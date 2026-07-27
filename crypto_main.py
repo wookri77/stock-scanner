@@ -31,7 +31,7 @@ def send_telegram_photo(photo_path, caption=""):
         except Exception as e:
             print(f"텔레그램 사진 전송 예외: {e}")
 
-# 2. 비트코인 차트 생성 함수 (EMA 112, 224, 448, 896 적용)
+# 2. 비트코인 차트 생성 함수 (EMA 112, 224, 448, 896)
 def create_btc_chart(df, timeframe, line_type):
     chart_df = df.iloc[-150:].copy()
     
@@ -71,10 +71,12 @@ exchange = ccxt.binance()
 
 TIMEFRAMES = ["5m", "1h", "4h", "12h", "1d"]
 
+print("=== BTC 스캐너 시작 ===")
+
 for tf in TIMEFRAMES:
     try:
-        # EMA896 계산 및 충분한 300캔들 검사를 위해 1800개 데이터 수집
-        ohlcv = exchange.fetch_ohlcv("BTC/USDT", timeframe=tf, limit=1800)
+        # EMA896 및 300캔들 검사를 위해 1500개 데이터 수집
+        ohlcv = exchange.fetch_ohlcv("BTC/USDT", timeframe=tf, limit=1500)
         df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
         df.set_index('Timestamp', inplace=True)
@@ -89,24 +91,25 @@ for tf in TIMEFRAMES:
         ema448 = close_s.ewm(span=448, adjust=False).mean()
         ema896 = close_s.ewm(span=896, adjust=False).mean()
 
-        # 최근 300개 캔들 내 정배열(112 > 224 > 448 > 896) 형성 이력 확인
+        # 최근 300개 캔들 내 정배열 유효성 판별
         recent_112 = ema112.iloc[-300:]
         recent_224 = ema224.iloc[-300:]
         recent_448 = ema448.iloc[-300:]
         recent_896 = ema896.iloc[-300:]
 
-        alignment = (recent_112 > recent_224) & (recent_224 > recent_448) & (recent_448 > recent_896)
-        if not alignment.any():
-            print(f"[{tf}] 최근 300캔들 내 정배열 조건 미충족")
+        alignment_main = (recent_112 > recent_224) & (recent_224 > recent_448)
+        alignment_full = alignment_main & (recent_448 > recent_896)
+
+        if not (alignment_full.any() or alignment_main.any()):
+            print(f"[{tf}] 최근 300캔들 내 정배열 미충족 스킵")
             continue
 
-        # 최근 5개 캔들 내 이평선 지지(±2.5% 범위) 검사
-        recent_low = low_s.iloc[-5:]
-        recent_high = high_s.iloc[-5:]
+        # 최근 3개 캔들 내 지지 여부 체크 (오차범위 ±0.1% 정밀 타격)
+        recent_low = low_s.iloc[-3:]
+        recent_high = high_s.iloc[-3:]
 
         curr_price = float(close_s.iloc[-1])
 
-        # 각 이평선별 지지 여부 체크
         lines_to_check = [
             ("112이평 지지", ema112),
             ("224이평 지지", ema224),
@@ -114,33 +117,41 @@ for tf in TIMEFRAMES:
             ("896이평 지지", ema896)
         ]
 
+        found_support = False
+
         for line_name, ema_series in lines_to_check:
-            recent_ema = ema_series.iloc[-5:]
-            # 캔들의 고가~저가가 이평선 근처(±2.5%)에 닿았는지 체크
-            if ((recent_low <= recent_ema * 1.025) & (recent_high >= recent_ema * 0.975)).any():
+            recent_ema = ema_series.iloc[-3:]
+            # 캔들의 고가~저가가 이평선의 ±0.1% 범위 내에 정확히 닿았는지 판별
+            if ((recent_low <= recent_ema * 1.001) & (recent_high >= recent_ema * 0.999)).any():
                 val = float(ema_series.dropna().iloc[-1])
                 caption = (
                     f"⚡ [비트코인(BTC/USDT) 포착]\n"
                     f"• 타임프레임: {tf}\n"
-                    f"• 상태: {line_name} (최근 300캔들 내 정배열 달성 후)\n"
+                    f"• 상태: {line_name} (오차 0.1% 터치)\n"
                     f"• 현재가: ${curr_price:,.2f}\n"
                     f"• 해당 이평선: ${val:,.2f}"
                 )
+                print(f"[{tf}] 포착 성공: {line_name}")
                 
                 chart_file = None
                 try:
                     chart_file = create_btc_chart(df, tf, line_name)
                     send_telegram_photo(chart_file, caption=caption)
                 except Exception as chart_err:
-                    print(f"차트 생성 실패 ({tf}): {chart_err}")
+                    print(f"차트 생성/전송 오류 ({tf}): {chart_err}")
                     send_telegram_msg(caption)
 
                 if chart_file and os.path.exists(chart_file):
                     os.remove(chart_file)
                 
-                # 해당 타임프레임에서 포착되면 1회 발송 후 다음 타임프레임으로
+                found_support = True
                 break
+
+        if not found_support:
+            print(f"[{tf}] 최근 3캔들 내 이평선 0.1% 범위 터치 없음")
 
     except Exception as e:
         print(f"비트코인 스캔 에러 ({tf}): {e}")
         continue
+
+print("=== BTC 스캐너 완료 ===")
