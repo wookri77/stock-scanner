@@ -6,7 +6,6 @@ import mplfinance as mpf
 import matplotlib.pyplot as plt
 from tvdatafeed import TvDatafeed, Interval
 
-# 1. 텔레그램 환경변수 설정
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -32,7 +31,6 @@ def send_telegram_photo(photo_path, caption=""):
         except Exception as e:
             print(f"텔레그램 사진 전송 예외: {e}")
 
-# 2. 차트 생성 함수 (make_addplot 수정)
 def create_btc_chart(df, timeframe, line_type):
     chart_df = df.iloc[-150:].copy()
     
@@ -42,7 +40,7 @@ def create_btc_chart(df, timeframe, line_type):
     ema448 = close_s.ewm(span=448, adjust=False).mean()
     ema896 = close_s.ewm(span=896, adjust=False).mean()
 
-    # mpf.make_addplot 으로 수정
+    # mpf.make_addplot (오타 수정완료)
     add_plots = [
         mpf.make_addplot(ema112, color='orange', width=1.2),
         mpf.make_addplot(ema224, color='red', width=1.2),
@@ -68,7 +66,7 @@ def create_btc_chart(df, timeframe, line_type):
     plt.close('all')
     return file_name
 
-# 3. 트레이딩뷰 객체
+# 트레이딩뷰 인스턴스 생성
 tv = TvDatafeed()
 
 TIMEFRAME_MAP = {
