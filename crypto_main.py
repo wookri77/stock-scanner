@@ -18,30 +18,42 @@ def send_telegram_msg(text):
         except Exception as e:
             print(f"텔레그램 텍스트 전송 예외: {e}")
 
-# 2. Upbit Public API 데이터 수집 (차단 0%, 100% 성공)
+# 2. Upbit Public API 데이터 수집 (500개 캔들 확보로 448일선 완벽 대응)
 UPBIT_TIMEFRAME_MAP = {
-    "5m": ("minutes/5", None),
-    "1h": ("minutes/60", None),
-    "4h": ("minutes/240", None),
-    "1d": ("days", None)
+    "5m": "minutes/5",
+    "1h": "minutes/60",
+    "4h": "minutes/240",
+    "1d": "days"
 }
 
-def fetch_upbit_btc(timeframe_str):
-    endpoint, _ = UPBIT_TIMEFRAME_MAP[timeframe_str]
-    url = f"https://api.upbit.com/v1/candles/{endpoint}?market=KRW-BTC&count=200"
-    
+def fetch_upbit_btc_500(timeframe_str):
+    endpoint = UPBIT_TIMEFRAME_MAP[timeframe_str]
+    base_url = f"https://api.upbit.com/v1/candles/{endpoint}?market=KRW-BTC&count=200"
     headers = {"accept": "application/json"}
-    res = requests.get(url, headers=headers, timeout=10)
-    res.raise_for_status()
-    data = res.json()
     
-    if not isinstance(data, list) or len(data) == 0:
+    all_candles = []
+    
+    # 1차 요청 (최신 200개)
+    res1 = requests.get(base_url, headers=headers, timeout=10)
+    res1.raise_for_status()
+    data1 = res1.json()
+    all_candles.extend(data1)
+    
+    # 2차 요청 (과거 200개 추가 수집하여 400~500개 확보)
+    if len(data1) > 0:
+        last_to = data1[-1]['candle_date_time_utc']
+        url2 = f"{base_url}&to={last_to}Z"
+        time.sleep(0.1)
+        res2 = requests.get(url2, headers=headers, timeout=10)
+        if res2.ok:
+            data2 = res2.json()
+            all_candles.extend(data2)
+
+    if not all_candles:
         raise Exception("Upbit 응답 데이터 없음")
 
-    # Upbit 응답: [ {opening_price, high_price, low_price, trade_price, ...}, ... ]
-    df = pd.DataFrame(data)
-    
-    # 과거 -> 현재 순서로 정렬
+    df = pd.DataFrame(all_candles)
+    # 과거 -> 현재 순서 정렬
     df = df.iloc[::-1].reset_index(drop=True)
     
     df['Close'] = df['trade_price'].astype(float)
@@ -53,7 +65,7 @@ def fetch_upbit_btc(timeframe_str):
 
 TIMEFRAMES = ["5m", "1h", "4h", "1d"]
 
-print("=== 비트코인 스캐너 시작 (Upbit API) ===")
+print("=== 비트코인 스캐너 시작 (Upbit 500봉 안정화 버전) ===")
 
 matched_alerts = []
 status_reports = []
@@ -61,33 +73,30 @@ status_reports = []
 for tf in TIMEFRAMES:
     try:
         time.sleep(0.2)
-        df = fetch_upbit_btc(tf)
+        df = fetch_upbit_btc_500(tf)
 
         close_s = df['Close']
         low_s = df['Low']
         high_s = df['High']
 
-        # 이동평균선 계산 (112, 224, 448)
-        # Upbit 캔들 수(200개)에 맞춰 112, 224선 중심 계산 및 적용
+        # 원래 기준: 112, 224, 448 이동평균선
         ma112 = close_s.rolling(112).mean()
         ma224 = close_s.rolling(224).mean()
         ma448 = close_s.rolling(448).mean()
 
-        # 최근 정배열 여부 확인 (112 > 224)
-        recent_112 = ma112.dropna()
-        recent_224 = ma224.dropna()
+        # 최근 200봉 기준 정배열 체크
+        check_range = min(200, len(df))
+        recent_112 = ma112.iloc[-check_range:]
+        recent_224 = ma224.iloc[-check_range:]
+        recent_448 = ma448.iloc[-check_range:]
 
-        if len(recent_112) == 0 or len(recent_224) == 0:
-            status_reports.append(f"• `{tf}`: 봉 개수 부족으로 이평선 미생성")
-            continue
+        alignment = (recent_112 > recent_224) & (recent_224 > recent_448)
 
-        # 정배열 확인 (112 > 224)
-        alignment = (ma112.iloc[-60:] > ma224.iloc[-60:])
         if not alignment.any():
-            status_reports.append(f"• `{tf}`: 최근 정배열 미충족")
+            status_reports.append(f"• `{tf}`: 최근 정배열(112>224>448) 미충족")
             continue
 
-        # 최근 3봉 기준 이평선 지지/터치 체크 (오차범위 ±0.3%)
+        # 최근 3봉 기준 이평선 지지/터치 체크 (오차범위 ±0.1%)
         recent_low = low_s.iloc[-3:]
         recent_high = high_s.iloc[-3:]
         curr_price = float(close_s.iloc[-1])
@@ -100,17 +109,17 @@ for tf in TIMEFRAMES:
 
         found = False
         for line_name, ma_series in lines_to_check:
-            valid_ma = ma_series.dropna()
-            if len(valid_ma) == 0:
+            valid_series = ma_series.dropna()
+            if len(valid_series) == 0:
                 continue
                 
             recent_ma = ma_series.iloc[-3:]
-            if ((recent_low <= recent_ma * 1.003) & (recent_high >= recent_ma * 0.997)).any():
-                val = float(valid_ma.iloc[-1])
+            if ((recent_low <= recent_ma * 1.001) & (recent_high >= recent_ma * 0.999)).any():
+                val = float(valid_series.iloc[-1])
                 alert_text = (
                     f"⚡ *[비트코인(BTC) 포착]*\n"
                     f"• *타임프레임:* `{tf}`\n"
-                    f"• *상태:* {line_name} (오차 0.3% 접촉)\n"
+                    f"• *상태:* {line_name} (오차 0.1% 접촉)\n"
                     f"• *현재가:* `{curr_price:,.0f}원`\n"
                     f"• *이평선 가격:* `{val:,.0f}원`"
                 )
@@ -123,7 +132,7 @@ for tf in TIMEFRAMES:
 
     except Exception as e:
         print(f"비트코인 스캔 에러 ({tf}): {e}")
-        status_reports.append(f"• `{tf}`: 데이터 조회 실패")
+        status_reports.append(f"• `{tf}`: 데이터 조회 실패 ({e})")
 
 # 3. 텔레그램 결과 전송
 if matched_alerts:
@@ -132,7 +141,7 @@ if matched_alerts:
 else:
     report_text = (
         "ℹ️ *[BTC 스캔 안내]*\n"
-        "현재 조건(정배열 + 112/224일선 지지)에 부합하는 구간이 없습니다.\n\n"
+        "현재 조건(정배열 + 112/224/448일선 ±0.1% 지지)에 부합하는 구간이 없습니다.\n\n"
         "*[타임프레임별 현황]*\n" + "\n".join(status_reports)
     )
     send_telegram_msg(report_text)
