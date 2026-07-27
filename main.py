@@ -29,15 +29,32 @@ def send_telegram_photo(photo_path, caption=""):
         except Exception as e:
             print(f"텔레그램 사진 전송 실패: {e}")
 
-# 2. 차트 생성 함수
+# 2. 차트 생성 함수 (데이터 구조 오류 수정)
 def create_stock_chart(df, name, symbol, line_type):
+    # 최근 120봉 분량 슬라이싱
     chart_df = df.iloc[-120:].copy()
+    
+    # yfinance MultiIndex 컬럼 문제 강제 정리
     if isinstance(chart_df.columns, pd.MultiIndex):
         chart_df.columns = chart_df.columns.get_level_values(0)
 
-    ma112 = chart_df['Close'].rolling(112).mean()
-    ma224 = chart_df['Close'].rolling(224).mean()
-    ma448 = chart_df['Close'].rolling(448).mean()
+    close_series = chart_df['Close']
+    if isinstance(close_series, pd.DataFrame):
+        close_series = close_series.iloc[:, 0]
+
+    # 이평선 계산
+    ma112 = close_series.rolling(112).mean()
+    ma224 = close_series.rolling(224).mean()
+    ma448 = close_series.rolling(448).mean()
+
+    # 차트용 데이터프레감 필수 컬럼만 정제
+    clean_df = pd.DataFrame({
+        'Open': chart_df['Open'].iloc[:, 0] if isinstance(chart_df['Open'], pd.DataFrame) else chart_df['Open'],
+        'High': chart_df['High'].iloc[:, 0] if isinstance(chart_df['High'], pd.DataFrame) else chart_df['High'],
+        'Low': chart_df['Low'].iloc[:, 0] if isinstance(chart_df['Low'], pd.DataFrame) else chart_df['Low'],
+        'Close': close_series,
+        'Volume': chart_df['Volume'].iloc[:, 0] if isinstance(chart_df['Volume'], pd.DataFrame) else chart_df['Volume']
+    }, index=chart_df.index)
 
     add_plots = [
         mpf.makeaddplot(ma112, color='orange', width=1.5),
@@ -50,7 +67,7 @@ def create_stock_chart(df, name, symbol, line_type):
 
     file_name = f"{symbol}_chart.png"
     mpf.plot(
-        chart_df,
+        clean_df,
         type='candle',
         style=s,
         addplot=add_plots,
@@ -63,37 +80,20 @@ def create_stock_chart(df, name, symbol, line_type):
     plt.close('all')
     return file_name
 
-# 3. 주요 종목 수집 (미국+한국 500여개)
+# 3. 대상 종목 리스트
 def get_target_tickers():
-    target_dict = {}
-
-    try:
-        sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        tables = pd.read_html(sp500_url)
-        us_df = tables[0]
-        us_tickers = us_df['Symbol'].str.replace('.', '-').tolist()[:200]
-        for ticker in us_tickers:
-            target_dict[ticker] = ticker
-    except Exception as e:
-        print(f"미국 목록 수집 예외: {e}")
-
-    us_backup = ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "NFLX", "INTC"]
-    for t in us_backup:
-        target_dict[t] = t
-
-    try:
-        krx_url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
-        krx_df = pd.read_html(krx_url, header=0)[0]
-        krx_df['종목코드'] = krx_df['종목코드'].map('{:06d}'.format)
-        for _, row in krx_df.head(200).iterrows():
-            target_dict[row['회사명']] = f"{row['종목코드']}.KS"
-    except Exception as e:
-        print(f"한국 목록 수집 예외: {e}")
-
-    return target_dict
+    return {
+        "애플": "AAPL", "엔비디아": "NVDA", "테슬라": "TSLA", "마이크로소프트": "MSFT",
+        "아마존": "AMZN", "구글": "GOOGL", "메타": "META", "AMD": "AMD",
+        "넷플릭스": "NFLX", "인텔": "INTC", "팔란티어": "PLTR", "코인베이스": "COIN",
+        "삼성전자": "005930.KS", "SK하이닉스": "000660.KS", "현대차": "005380.KS",
+        "NAVER": "035420.KS", "카카오": "035720.KS", "LG에너지솔루션": "373220.KS",
+        "삼성바이오로직스": "207940.KS", "기아": "000270.KS", "셀트리온": "068270.KS",
+        "KB금융": "105560.KS", "POSCO홀딩스": "005490.KS", "에코프로비엠": "247540.KQ"
+    }
 
 # 4. 분석 실행
-send_telegram_msg("🚀 스캐너가 정상 동작 중입니다! 종목 분석을 시작합니다.")
+send_telegram_msg("🚀 스캐너 분석을 시작합니다!")
 
 TARGET_STOCKS = get_target_tickers()
 matched_count = 0
@@ -102,13 +102,7 @@ for name, symbol in TARGET_STOCKS.items():
     try:
         df = yf.download(symbol, period="3y", progress=False)
         if df.empty or len(df) < 450:
-            if symbol.endswith(".KS"):
-                symbol = symbol.replace(".KS", ".KQ")
-                df = yf.download(symbol, period="3y", progress=False)
-                if df.empty or len(df) < 450:
-                    continue
-            else:
-                continue
+            continue
 
         close = df['Close']
         low = df['Low']
@@ -122,6 +116,7 @@ for name, symbol in TARGET_STOCKS.items():
         ma224 = close.rolling(224).mean()
         ma448 = close.rolling(448).mean()
 
+        # 최근 6개월 정배열 이력 확인
         recent_112 = ma112.iloc[-120:]
         recent_224 = ma224.iloc[-120:]
         recent_448 = ma448.iloc[-120:]
@@ -130,6 +125,7 @@ for name, symbol in TARGET_STOCKS.items():
         if not alignment_6m.any():
             continue
 
+        # 최근 3일 이내 지지 확인
         recent_low = low.iloc[-3:]
         recent_high = high.iloc[-3:]
         recent_ma112 = ma112.iloc[-3:]
@@ -157,11 +153,16 @@ for name, symbol in TARGET_STOCKS.items():
         if detected:
             matched_count += 1
             caption = f"🎯 *[{name}]* ({symbol})\n• 상태: *{line_info}*\n• 현재가: {curr_price:,.2f} / 해당 이평선: {val:,.2f}"
+            
+            # 차트 이미지 생성 및 전송
             chart_file = create_stock_chart(df, name, symbol, line_info)
             send_telegram_photo(chart_file, caption=caption)
+            
             if os.path.exists(chart_file):
                 os.remove(chart_file)
+
     except Exception as e:
+        print(f"Error on {symbol}: {e}")
         continue
 
 if matched_count == 0:
