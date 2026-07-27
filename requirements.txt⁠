@@ -1,5 +1,7 @@
 tvdatafeed
 pandas
+yfinance
 mplfinance
 matplotlib
 requests
+git+https://github.com/mcarbone/tvdatafeed.git
