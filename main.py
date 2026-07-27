@@ -80,43 +80,40 @@ for name, symbol in TARGET_STOCKS.items():
         if isinstance(low, pd.DataFrame): low = low.iloc[:, 0]
         if isinstance(high, pd.DataFrame): high = high.iloc[:, 0]
 
-        # 이동평균선 계산 (중장기 이평선 중심)
-        ma60 = close.rolling(60).mean()
+        # 주요 장기 이동평균선 계산 (112, 224, 448일선)
         ma112 = close.rolling(112).mean()
         ma224 = close.rolling(224).mean()
         ma448 = close.rolling(448).mean()
 
         # 최근 120봉(약 6개월) 데이터 슬라이싱
         lookback = 120
-        recent_ma60 = ma60.iloc[-lookback:]
         recent_ma112 = ma112.iloc[-lookback:]
         recent_ma224 = ma224.iloc[-lookback:]
         recent_ma448 = ma448.iloc[-lookback:]
         recent_low = low.iloc[-lookback:]
         recent_high = high.iloc[-lookback:]
 
-        # 조건 1: 중장기 이평선(60 > 112 > 224 > 448) 정배열 달성 확인
-        mid_long_alignment = (
-            (recent_ma60 > recent_ma112) & 
+        # 조건 1: 대세 장기 정배열 추세 판정 (112일선 > 224일선 > 448일선 우상향)
+        long_term_alignment = (
             (recent_ma112 > recent_ma224) & 
             (recent_ma224 > recent_ma448)
         )
 
-        if not mid_long_alignment.any():
+        if not long_term_alignment.any():
             continue
 
-        align_indices = mid_long_alignment[mid_long_alignment].index
+        align_indices = long_term_alignment[long_term_alignment].index
         last_align_idx = align_indices[-1]
 
         post_align_low = recent_low.loc[last_align_idx:]
         post_align_high = recent_high.loc[last_align_idx:]
         post_align_ma112 = recent_ma112.loc[last_align_idx:]
 
-        # 조건 2: 112일선 지지 오차범위 (-2% ~ +1.5%)
+        # 조건 2: 112일선 지지/터치 (저가가 112일선 오차범위 -2% ~ +1.5% 내 진입)
         touch_112 = (post_align_low <= post_align_ma112 * 1.015) & (post_align_high >= post_align_ma112 * 0.98)
         touch_indices = touch_112[touch_112].index
 
-        # 조건 3: 정배열 발생 후 '첫 번째' 지지가 '오늘' 터치되었는지 확인
+        # 조건 3: 정배열 추세 유지 중 '첫 번째' 112일선 지지가 '오늘(장마감 봉)'에 딱 걸쳤는지 확인
         if len(touch_indices) > 0:
             first_touch_date = touch_indices[0]
             if first_touch_date == df.index[-1]:
@@ -132,8 +129,8 @@ for name, symbol in TARGET_STOCKS.items():
 
 # 4. 결과 텔레그램 전송
 if matched_stocks:
-    msg = f"🎯 **[중장기 정배열(60>112>224>448) 후 112일선 첫 지지 포착!]**\n\n" + "\n\n".join(matched_stocks)
+    msg = f"🎯 **[장기 정배열 추세 ➔ 112일선 첫 지지 포착!]**\n\n" + "\n\n".join(matched_stocks)
 else:
-    msg = "🔍 오늘 600개 주요 종목 중 중장기 정배열 후 112일선 '첫 번째' 지지가 발생한 종목이 없습니다."
+    msg = "🔍 오늘 600개 주요 종목 중 장기 정배열 후 112일선 '첫 번째' 지지가 발생한 종목이 없습니다."
 
 send_telegram_msg(msg)
