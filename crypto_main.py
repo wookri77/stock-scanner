@@ -73,6 +73,9 @@ TIMEFRAMES = ["5m", "1h", "4h", "12h", "1d"]
 
 print("=== BTC 스캐너 시작 ===")
 
+any_matched = False
+status_reports = []
+
 for tf in TIMEFRAMES:
     try:
         # EMA896 및 300캔들 검사를 위해 1500개 데이터 수집
@@ -100,7 +103,10 @@ for tf in TIMEFRAMES:
         alignment_main = (recent_112 > recent_224) & (recent_224 > recent_448)
         alignment_full = alignment_main & (recent_448 > recent_896)
 
-        if not (alignment_full.any() or alignment_main.any()):
+        is_aligned = alignment_full.any() or alignment_main.any()
+
+        if not is_aligned:
+            status_reports.append(f"• {tf}: 정배열 미충족")
             print(f"[{tf}] 최근 300캔들 내 정배열 미충족 스킵")
             continue
 
@@ -145,13 +151,21 @@ for tf in TIMEFRAMES:
                     os.remove(chart_file)
                 
                 found_support = True
+                any_matched = True
                 break
 
         if not found_support:
+            status_reports.append(f"• {tf}: 정배열 충족, 이평선(±0.1%) 미접촉")
             print(f"[{tf}] 최근 3캔들 내 이평선 0.1% 범위 터치 없음")
 
     except Exception as e:
         print(f"비트코인 스캔 에러 ({tf}): {e}")
+        status_reports.append(f"• {tf}: 에러 발생")
         continue
+
+# 조건에 부합하는 타임프레임이 하나도 없을 때 텔레그램 메시지 발송
+if not any_matched:
+    report_text = "ℹ️ [BTC/USDT 스캔 안내]\n현재 조건(정배열 + 이평선 ±0.1% 터치)에 부합하는 타임프레임이 없습니다.\n\n[타임프레임별 상태]\n" + "\n".join(status_reports)
+    send_telegram_msg(report_text)
 
 print("=== BTC 스캐너 완료 ===")
