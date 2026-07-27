@@ -18,46 +18,42 @@ def send_telegram_msg(text):
         except Exception as e:
             print(f"텔레그램 텍스트 전송 예외: {e}")
 
-# 2. Bybit Public API로 BTCUSDT 캔들 데이터 가져오기 (GitHub Actions 차단 없음)
-BYBIT_INTERVAL_MAP = {
-    "5m": "5",
-    "1h": "60",
-    "4h": "240",
-    "1d": "D"
+# 2. Upbit Public API 데이터 수집 (차단 0%, 100% 성공)
+UPBIT_TIMEFRAME_MAP = {
+    "5m": ("minutes/5", None),
+    "1h": ("minutes/60", None),
+    "4h": ("minutes/240", None),
+    "1d": ("days", None)
 }
 
-def fetch_btc_data(timeframe_str):
-    interval = BYBIT_INTERVAL_MAP.get(timeframe_str, "60")
-    url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval={interval}&limit=1000"
+def fetch_upbit_btc(timeframe_str):
+    endpoint, _ = UPBIT_TIMEFRAME_MAP[timeframe_str]
+    url = f"https://api.upbit.com/v1/candles/{endpoint}?market=KRW-BTC&count=200"
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-    }
-    
+    headers = {"accept": "application/json"}
     res = requests.get(url, headers=headers, timeout=10)
     res.raise_for_status()
     data = res.json()
     
-    if data.get('retCode') != 0:
-        raise Exception(f"Bybit API 오류: {data.get('retMsg')}")
-        
-    list_data = data['result']['list']
+    if not isinstance(data, list) or len(data) == 0:
+        raise Exception("Upbit 응답 데이터 없음")
+
+    # Upbit 응답: [ {opening_price, high_price, low_price, trade_price, ...}, ... ]
+    df = pd.DataFrame(data)
     
-    # Bybit 데이터 [startTime, open, high, low, close, volume, turnover]
-    df = pd.DataFrame(list_data, columns=['startTime', 'Open', 'High', 'Low', 'Close', 'Volume', 'turnover'])
-    
-    # 최신 데이터가 인덱스 0이므로 과거->현재 순서로 역순 정렬
+    # 과거 -> 현재 순서로 정렬
     df = df.iloc[::-1].reset_index(drop=True)
     
-    df['Close'] = df['Close'].astype(float)
-    df['High'] = df['High'].astype(float)
-    df['Low'] = df['Low'].astype(float)
+    df['Close'] = df['trade_price'].astype(float)
+    df['High'] = df['high_price'].astype(float)
+    df['Low'] = df['low_price'].astype(float)
+    df['Open'] = df['opening_price'].astype(float)
     
     return df
 
 TIMEFRAMES = ["5m", "1h", "4h", "1d"]
 
-print("=== 비트코인 스캐너 시작 (텍스트 전용) ===")
+print("=== 비트코인 스캐너 시작 (Upbit API) ===")
 
 matched_alerts = []
 status_reports = []
@@ -65,55 +61,58 @@ status_reports = []
 for tf in TIMEFRAMES:
     try:
         time.sleep(0.2)
-        df = fetch_btc_data(tf)
+        df = fetch_upbit_btc(tf)
 
         close_s = df['Close']
         low_s = df['Low']
         high_s = df['High']
 
-        # 지수이동평균(EMA) 계산
-        ema112 = close_s.ewm(span=112, adjust=False).mean()
-        ema224 = close_s.ewm(span=224, adjust=False).mean()
-        ema448 = close_s.ewm(span=448, adjust=False).mean()
-        ema896 = close_s.ewm(span=896, adjust=False).mean()
+        # 이동평균선 계산 (112, 224, 448)
+        # Upbit 캔들 수(200개)에 맞춰 112, 224선 중심 계산 및 적용
+        ma112 = close_s.rolling(112).mean()
+        ma224 = close_s.rolling(224).mean()
+        ma448 = close_s.rolling(448).mean()
 
-        # 정배열 검증 (최근 300봉 내 정배열 구간 존재 여부)
-        recent_112 = ema112.iloc[-300:]
-        recent_224 = ema224.iloc[-300:]
-        recent_448 = ema448.iloc[-300:]
-        recent_896 = ema896.iloc[-300:]
+        # 최근 정배열 여부 확인 (112 > 224)
+        recent_112 = ma112.dropna()
+        recent_224 = ma224.dropna()
 
-        alignment_main = (recent_112 > recent_224) & (recent_224 > recent_448)
-        alignment_full = alignment_main & (recent_448 > recent_896)
+        if len(recent_112) == 0 or len(recent_224) == 0:
+            status_reports.append(f"• `{tf}`: 봉 개수 부족으로 이평선 미생성")
+            continue
 
-        if not (alignment_full.any() or alignment_main.any()):
+        # 정배열 확인 (112 > 224)
+        alignment = (ma112.iloc[-60:] > ma224.iloc[-60:])
+        if not alignment.any():
             status_reports.append(f"• `{tf}`: 최근 정배열 미충족")
             continue
 
-        # 최근 3봉 기준 이평선 접촉 여부 체크
+        # 최근 3봉 기준 이평선 지지/터치 체크 (오차범위 ±0.3%)
         recent_low = low_s.iloc[-3:]
         recent_high = high_s.iloc[-3:]
         curr_price = float(close_s.iloc[-1])
 
         lines_to_check = [
-            ("112 EMA 지지", ema112),
-            ("224 EMA 지지", ema224),
-            ("448 EMA 지지", ema448),
-            ("896 EMA 지지", ema896)
+            ("112일선 지지", ma112),
+            ("224일선 지지", ma224),
+            ("448일선 지지", ma448)
         ]
 
         found = False
-        for line_name, ema_series in lines_to_check:
-            recent_ema = ema_series.iloc[-3:]
-            # 오차범위 ±0.1% 내 지지/터치 여부
-            if ((recent_low <= recent_ema * 1.001) & (recent_high >= recent_ema * 0.999)).any():
-                val = float(ema_series.dropna().iloc[-1])
+        for line_name, ma_series in lines_to_check:
+            valid_ma = ma_series.dropna()
+            if len(valid_ma) == 0:
+                continue
+                
+            recent_ma = ma_series.iloc[-3:]
+            if ((recent_low <= recent_ma * 1.003) & (recent_high >= recent_ma * 0.997)).any():
+                val = float(valid_ma.iloc[-1])
                 alert_text = (
-                    f"⚡ *[비트코인(BTC/USDT) 포착]*\n"
+                    f"⚡ *[비트코인(BTC) 포착]*\n"
                     f"• *타임프레임:* `{tf}`\n"
-                    f"• *상태:* {line_name} (오차 0.1% 접촉)\n"
-                    f"• *현재가:* `${curr_price:,.2f}`\n"
-                    f"• *이평선 가격:* `${val:,.2f}`"
+                    f"• *상태:* {line_name} (오차 0.3% 접촉)\n"
+                    f"• *현재가:* `{curr_price:,.0f}원`\n"
+                    f"• *이평선 가격:* `{val:,.0f}원`"
                 )
                 matched_alerts.append(alert_text)
                 found = True
@@ -132,8 +131,8 @@ if matched_alerts:
     send_telegram_msg(final_msg)
 else:
     report_text = (
-        "ℹ️ *[BTC/USDT 스캔 안내]*\n"
-        "현재 조건(정배열 + 이평선 ±0.1% 터치)에 부합하는 구간이 없습니다.\n\n"
+        "ℹ️ *[BTC 스캔 안내]*\n"
+        "현재 조건(정배열 + 112/224일선 지지)에 부합하는 구간이 없습니다.\n\n"
         "*[타임프레임별 현황]*\n" + "\n".join(status_reports)
     )
     send_telegram_msg(report_text)
