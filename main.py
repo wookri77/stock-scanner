@@ -5,7 +5,7 @@ import yfinance as yf
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 
-# 1. 텔레그램 환경변수 불러오기
+# 1. 텔레그램 환경변수
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -29,10 +29,9 @@ def send_telegram_photo(photo_path, caption=""):
         except Exception as e:
             print(f"텔레그램 사진 전송 실패: {e}")
 
-# 2. 차트 이미지 생성 함수
+# 2. 차트 생성 함수
 def create_stock_chart(df, name, symbol, line_type):
     chart_df = df.iloc[-120:].copy()
-    
     if isinstance(chart_df.columns, pd.MultiIndex):
         chart_df.columns = chart_df.columns.get_level_values(0)
 
@@ -50,7 +49,6 @@ def create_stock_chart(df, name, symbol, line_type):
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=True)
 
     file_name = f"{symbol}_chart.png"
-    
     mpf.plot(
         chart_df,
         type='candle',
@@ -65,59 +63,42 @@ def create_stock_chart(df, name, symbol, line_type):
     plt.close('all')
     return file_name
 
-# 3. 주요 종목 수집
+# 3. 주요 종목 수집 (미국+한국 500여개)
 def get_target_tickers():
     target_dict = {}
 
-    print("미국 주요 종목 수집 중...")
     try:
         sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         tables = pd.read_html(sp500_url)
         us_df = tables[0]
-        us_tickers = us_df['Symbol'].str.replace('.', '-').tolist()[:250]
+        us_tickers = us_df['Symbol'].str.replace('.', '-').tolist()[:200]
         for ticker in us_tickers:
             target_dict[ticker] = ticker
     except Exception as e:
-        print(f"미국 크롤링 예외: {e}")
+        print(f"미국 목록 수집 예외: {e}")
 
     us_backup = ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "NFLX", "INTC"]
     for t in us_backup:
         target_dict[t] = t
 
-    print("한국 주요 종목 수집 중...")
     try:
         krx_url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
         krx_df = pd.read_html(krx_url, header=0)[0]
         krx_df['종목코드'] = krx_df['종목코드'].map('{:06d}'.format)
-        
-        for _, row in krx_df.head(250).iterrows():
-            code = row['종목코드']
-            name = row['회사명']
-            target_dict[f"{name}"] = f"{code}.KS"
+        for _, row in krx_df.head(200).iterrows():
+            target_dict[row['회사명']] = f"{row['종목코드']}.KS"
     except Exception as e:
-        print(f"한국 크롤링 예외: {e}")
-
-    kr_backup = {
-        "삼성전자": "005930.KS", "SK하이닉스": "000660.KS", "LG에너지솔루션": "373220.KS",
-        "삼성바이오로직스": "207940.KS", "현대차": "005380.KS", "기아": "000270.KS",
-        "셀트리온": "068270.KS", "KB금융": "105560.KS", "NAVER": "035420.KS"
-    }
-    target_dict.update(kr_backup)
+        print(f"한국 목록 수집 예외: {e}")
 
     return target_dict
 
-# 4. 메인 로직
-TARGET_STOCKS = get_target_tickers()
-print(f"총 {len(TARGET_STOCKS)}개 종목 분석을 시작합니다.")
+# 4. 분석 실행
+send_telegram_msg("🚀 스캐너가 정상 동작 중입니다! 종목 분석을 시작합니다.")
 
+TARGET_STOCKS = get_target_tickers()
 matched_count = 0
-count = 0
 
 for name, symbol in TARGET_STOCKS.items():
-    count += 1
-    if count % 50 == 0:
-        print(f"진행 상황: {count}/{len(TARGET_STOCKS)} 종목 분석 완료...")
-
     try:
         df = yf.download(symbol, period="3y", progress=False)
         if df.empty or len(df) < 450:
@@ -141,10 +122,9 @@ for name, symbol in TARGET_STOCKS.items():
         ma224 = close.rolling(224).mean()
         ma448 = close.rolling(448).mean()
 
-        lookback_6m = 120
-        recent_112 = ma112.iloc[-lookback_6m:]
-        recent_224 = ma224.iloc[-lookback_6m:]
-        recent_448 = ma448.iloc[-lookback_6m:]
+        recent_112 = ma112.iloc[-120:]
+        recent_224 = ma224.iloc[-120:]
+        recent_448 = ma448.iloc[-120:]
 
         alignment_6m = (recent_112 > recent_224) & (recent_224 > recent_448)
         if not alignment_6m.any():
@@ -157,41 +137,30 @@ for name, symbol in TARGET_STOCKS.items():
         recent_ma448 = ma448.iloc[-3:]
 
         curr_price = close.iloc[-1]
-        
         detected = False
         line_info = ""
         val = 0
 
-        touch_112 = (recent_low <= recent_ma112 * 1.02) & (recent_high >= recent_ma112 * 0.97)
-        if touch_112.any():
+        if ((recent_low <= recent_ma112 * 1.02) & (recent_high >= recent_ma112 * 0.97)).any():
             detected = True
             line_info = "112일선 지지"
             val = ma112.iloc[-1]
-
-        elif (recent_low <= recent_ma224 * 1.02).any() and (recent_high >= recent_ma224 * 0.97).any():
+        elif ((recent_low <= recent_ma224 * 1.02) & (recent_high >= recent_ma224 * 0.97)).any():
             detected = True
             line_info = "224일선 지지"
             val = ma224.iloc[-1]
-
-        elif (recent_low <= recent_ma448 * 1.02).any() and (recent_high >= recent_ma448 * 0.97).any():
+        elif ((recent_low <= recent_ma448 * 1.02) & (recent_high >= recent_ma448 * 0.97)).any():
             detected = True
             line_info = "448일선 지지"
             val = ma448.iloc[-1]
 
         if detected:
             matched_count += 1
-            caption = (
-                f"🎯 *[{name}]* ({symbol})\n"
-                f"• 상태: *{line_info}*\n"
-                f"• 현재가: {curr_price:,.2f} / 해당 이평선: {val:,.2f}"
-            )
-            
+            caption = f"🎯 *[{name}]* ({symbol})\n• 상태: *{line_info}*\n• 현재가: {curr_price:,.2f} / 해당 이평선: {val:,.2f}"
             chart_file = create_stock_chart(df, name, symbol, line_info)
             send_telegram_photo(chart_file, caption=caption)
-            
             if os.path.exists(chart_file):
                 os.remove(chart_file)
-
     except Exception as e:
         continue
 
