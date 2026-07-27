@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v3
 
@@ -18,7 +19,7 @@ jobs:
 
       - name: 패키지 설치
         run: |
-          pip install yfinance pandas requests
+          pip install yfinance pandas requests lxml html5lib
 
       - name: 파이썬 스크립트 실행
         env:
