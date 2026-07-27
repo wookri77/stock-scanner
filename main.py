@@ -109,14 +109,16 @@ for name, symbol in TARGET_STOCKS.items():
         post_align_high = recent_high.loc[last_align_idx:]
         post_align_ma112 = recent_ma112.loc[last_align_idx:]
 
-        # 조건 2: 112일선 지지/터치 (저가가 112일선 오차범위 -2% ~ +1.5% 내 진입)
-        touch_112 = (post_align_low <= post_align_ma112 * 1.015) & (post_align_high >= post_align_ma112 * 0.98)
+        # 조건 2: 112일선 지지/터치 (오차범위 -3% ~ +3%로 설정)
+        touch_112 = (post_align_low <= post_align_ma112 * 1.03) & (post_align_high >= post_align_ma112 * 0.97)
         touch_indices = touch_112[touch_112].index
 
-        # 조건 3: 정배열 추세 유지 중 '첫 번째' 112일선 지지가 '오늘(장마감 봉)'에 딱 걸쳤는지 확인
+        # 조건 3: 정배열 추세 중 '첫 번째' 112일선 지지가 '최근 3일 이내(오늘 포함)'에 발생했는지 확인
         if len(touch_indices) > 0:
             first_touch_date = touch_indices[0]
-            if first_touch_date == df.index[-1]:
+            recent_3_days = df.index[-3:]
+            
+            if first_touch_date in recent_3_days:
                 curr_price = close.iloc[-1]
                 val_112 = ma112.iloc[-1]
                 matched_stocks.append(
