@@ -1,6 +1,5 @@
-requests
+ccxt
 pandas
-yfinance
 mplfinance
 matplotlib
-lxml
+requests
