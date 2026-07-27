@@ -32,7 +32,7 @@ def send_telegram_photo(photo_path, caption=""):
         except Exception as e:
             print(f"텔레그램 사진 전송 예외: {e}")
 
-# 2. 비트코인 차트 생성 함수 (EMA 112, 224, 448, 896 적용)
+# 2. 차트 생성 함수 (make_addplot 수정)
 def create_btc_chart(df, timeframe, line_type):
     chart_df = df.iloc[-150:].copy()
     
@@ -42,11 +42,12 @@ def create_btc_chart(df, timeframe, line_type):
     ema448 = close_s.ewm(span=448, adjust=False).mean()
     ema896 = close_s.ewm(span=896, adjust=False).mean()
 
+    # mpf.make_addplot 으로 수정
     add_plots = [
-        mpf.makeaddplot(ema112, color='orange', width=1.2),
-        mpf.makeaddplot(ema224, color='red', width=1.2),
-        mpf.makeaddplot(ema448, color='purple', width=1.2),
-        mpf.makeaddplot(ema896, color='green', width=1.2)
+        mpf.make_addplot(ema112, color='orange', width=1.2),
+        mpf.make_addplot(ema224, color='red', width=1.2),
+        mpf.make_addplot(ema448, color='purple', width=1.2),
+        mpf.make_addplot(ema896, color='green', width=1.2)
     ]
 
     mc = mpf.make_marketcolors(up='red', down='blue', edge='inherit', wick='inherit')
@@ -67,21 +68,17 @@ def create_btc_chart(df, timeframe, line_type):
     plt.close('all')
     return file_name
 
-# 3. 트레이딩뷰(TvDatafeed) 객체 생성 (비로그인 상태로 사용 가능)
+# 3. 트레이딩뷰 객체
 tv = TvDatafeed()
 
-# 타임프레임 매핑 (트레이딩뷰 규격)
 TIMEFRAME_MAP = {
     "5m": Interval.in_5_minute,
     "1h": Interval.in_1_hour,
     "4h": Interval.in_4_hour,
-    "12h": Interval.in_2_hour, # tvdatafeed에서 12h 미지원 시 대안 또는 1d/4h 조합 사용
     "1d": Interval.in_daily
 }
 
 def fetch_tv_btc(timeframe_str):
-    """트레이딩뷰에서 BTC/USDT 차트 데이터 수집"""
-    # BYBIT 소스 우선, 실패 시 BINANCE 소스 사용
     exchanges = ["BYBIT", "BINANCE"]
     interval = TIMEFRAME_MAP.get(timeframe_str, Interval.in_1_hour)
     
@@ -89,21 +86,20 @@ def fetch_tv_btc(timeframe_str):
         try:
             df = tv.get_hist(symbol='BTCUSDT', exchange=ex, interval=interval, n_bars=1000)
             if df is not None and not df.empty:
-                # 컬럼명 통일 (open -> Open 등)
                 df = df.rename(columns={
                     'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
                 })
                 print(f"[{timeframe_str}] 트레이딩뷰 데이터 수집 성공 ({ex})")
                 return df
         except Exception as e:
-            print(f"[{timeframe_str}] {ex} 트레이딩뷰 수집 실패: {e}")
+            print(f"[{timeframe_str}] {ex} 수집 실패: {e}")
             time.sleep(0.5)
             
-    raise Exception("트레이딩뷰 데이터 수집 전체 실패")
+    raise Exception("트레이딩뷰 데이터 수집 실패")
 
-TIMEFRAMES = ["5m", "1h", "4h", "1d"]  # 안정적인 지원 타임프레임
+TIMEFRAMES = ["5m", "1h", "4h", "1d"]
 
-print("=== BTC 스캐너 시작 (TradingView Engine) ===")
+print("=== BTC 스캐너 시작 ===")
 
 any_matched = False
 status_reports = []
