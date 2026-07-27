@@ -2,121 +2,82 @@ import os
 import time
 import requests
 import pandas as pd
-import mplfinance as mpf
-import matplotlib.pyplot as plt
-from tvdatafeed import TvDatafeed, Interval
 
+# 1. 텔레그램 설정
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 def send_telegram_msg(text):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
         try:
-            requests.post(url, json=payload)
+            res = requests.post(url, json=payload, timeout=10)
+            if not res.ok:
+                print(f"텔레그램 전송 실패 응답: {res.text}")
         except Exception as e:
-            print(f"텔레그램 텍스트 전송 실패: {e}")
+            print(f"텔레그램 텍스트 전송 예외: {e}")
 
-def send_telegram_photo(photo_path, caption=""):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID and os.path.exists(photo_path):
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        try:
-            with open(photo_path, 'rb') as photo:
-                payload = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
-                files = {"photo": photo}
-                res = requests.post(url, data=payload, files=files)
-                if not res.ok:
-                    print(f"사진 전송 응답 오류 ({photo_path}): {res.text}")
-        except Exception as e:
-            print(f"텔레그램 사진 전송 예외: {e}")
-
-def create_btc_chart(df, timeframe, line_type):
-    chart_df = df.iloc[-150:].copy()
-    
-    close_s = chart_df['Close']
-    ema112 = close_s.ewm(span=112, adjust=False).mean()
-    ema224 = close_s.ewm(span=224, adjust=False).mean()
-    ema448 = close_s.ewm(span=448, adjust=False).mean()
-    ema896 = close_s.ewm(span=896, adjust=False).mean()
-
-    # mpf.make_addplot (오타 수정완료)
-    add_plots = [
-        mpf.make_addplot(ema112, color='orange', width=1.2),
-        mpf.make_addplot(ema224, color='red', width=1.2),
-        mpf.make_addplot(ema448, color='purple', width=1.2),
-        mpf.make_addplot(ema896, color='green', width=1.2)
-    ]
-
-    mc = mpf.make_marketcolors(up='red', down='blue', edge='inherit', wick='inherit')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=True)
-
-    file_name = f"BTC_{timeframe}_chart.png"
-    mpf.plot(
-        chart_df,
-        type='candle',
-        style=s,
-        addplot=add_plots,
-        title=f"\nBTC/USDT ({timeframe}) - {line_type}",
-        savefig=file_name,
-        volume=False,
-        figratio=(12, 7),
-        figscale=1.1
-    )
-    plt.close('all')
-    return file_name
-
-# 트레이딩뷰 인스턴스 생성
-tv = TvDatafeed()
-
-TIMEFRAME_MAP = {
-    "5m": Interval.in_5_minute,
-    "1h": Interval.in_1_hour,
-    "4h": Interval.in_4_hour,
-    "1d": Interval.in_daily
+# 2. Bybit Public API로 BTCUSDT 캔들 데이터 가져오기 (GitHub Actions 차단 없음)
+BYBIT_INTERVAL_MAP = {
+    "5m": "5",
+    "1h": "60",
+    "4h": "240",
+    "1d": "D"
 }
 
-def fetch_tv_btc(timeframe_str):
-    exchanges = ["BYBIT", "BINANCE"]
-    interval = TIMEFRAME_MAP.get(timeframe_str, Interval.in_1_hour)
+def fetch_btc_data(timeframe_str):
+    interval = BYBIT_INTERVAL_MAP.get(timeframe_str, "60")
+    url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval={interval}&limit=1000"
     
-    for ex in exchanges:
-        try:
-            df = tv.get_hist(symbol='BTCUSDT', exchange=ex, interval=interval, n_bars=1000)
-            if df is not None and not df.empty:
-                df = df.rename(columns={
-                    'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
-                })
-                print(f"[{timeframe_str}] 트레이딩뷰 데이터 수집 성공 ({ex})")
-                return df
-        except Exception as e:
-            print(f"[{timeframe_str}] {ex} 수집 실패: {e}")
-            time.sleep(0.5)
-            
-    raise Exception("트레이딩뷰 데이터 수집 실패")
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+    }
+    
+    res = requests.get(url, headers=headers, timeout=10)
+    res.raise_for_status()
+    data = res.json()
+    
+    if data.get('retCode') != 0:
+        raise Exception(f"Bybit API 오류: {data.get('retMsg')}")
+        
+    list_data = data['result']['list']
+    
+    # Bybit 데이터 [startTime, open, high, low, close, volume, turnover]
+    df = pd.DataFrame(list_data, columns=['startTime', 'Open', 'High', 'Low', 'Close', 'Volume', 'turnover'])
+    
+    # 최신 데이터가 인덱스 0이므로 과거->현재 순서로 역순 정렬
+    df = df.iloc[::-1].reset_index(drop=True)
+    
+    df['Close'] = df['Close'].astype(float)
+    df['High'] = df['High'].astype(float)
+    df['Low'] = df['Low'].astype(float)
+    
+    return df
 
 TIMEFRAMES = ["5m", "1h", "4h", "1d"]
 
-print("=== BTC 스캐너 시작 ===")
+print("=== 비트코인 스캐너 시작 (텍스트 전용) ===")
 
-any_matched = False
+matched_alerts = []
 status_reports = []
 
 for tf in TIMEFRAMES:
     try:
-        time.sleep(0.5)
-
-        df = fetch_tv_btc(tf)
+        time.sleep(0.2)
+        df = fetch_btc_data(tf)
 
         close_s = df['Close']
         low_s = df['Low']
         high_s = df['High']
 
+        # 지수이동평균(EMA) 계산
         ema112 = close_s.ewm(span=112, adjust=False).mean()
         ema224 = close_s.ewm(span=224, adjust=False).mean()
         ema448 = close_s.ewm(span=448, adjust=False).mean()
         ema896 = close_s.ewm(span=896, adjust=False).mean()
 
+        # 정배열 검증 (최근 300봉 내 정배열 구간 존재 여부)
         recent_112 = ema112.iloc[-300:]
         recent_224 = ema224.iloc[-300:]
         recent_448 = ema448.iloc[-300:]
@@ -125,70 +86,56 @@ for tf in TIMEFRAMES:
         alignment_main = (recent_112 > recent_224) & (recent_224 > recent_448)
         alignment_full = alignment_main & (recent_448 > recent_896)
 
-        is_aligned = alignment_full.any() or alignment_main.any()
-
-        if not is_aligned:
-            status_reports.append(f"• {tf}: 최근 정배열 미충족")
-            print(f"[{tf}] 정배열 미충족 스킵")
+        if not (alignment_full.any() or alignment_main.any()):
+            status_reports.append(f"• `{tf}`: 최근 정배열 미충족")
             continue
 
+        # 최근 3봉 기준 이평선 접촉 여부 체크
         recent_low = low_s.iloc[-3:]
         recent_high = high_s.iloc[-3:]
-
         curr_price = float(close_s.iloc[-1])
 
         lines_to_check = [
-            ("112이평 지지", ema112),
-            ("224이평 지지", ema224),
-            ("448이평 지지", ema448),
-            ("896이평 지지", ema896)
+            ("112 EMA 지지", ema112),
+            ("224 EMA 지지", ema224),
+            ("448 EMA 지지", ema448),
+            ("896 EMA 지지", ema896)
         ]
 
-        found_support = False
-
+        found = False
         for line_name, ema_series in lines_to_check:
             recent_ema = ema_series.iloc[-3:]
+            # 오차범위 ±0.1% 내 지지/터치 여부
             if ((recent_low <= recent_ema * 1.001) & (recent_high >= recent_ema * 0.999)).any():
                 val = float(ema_series.dropna().iloc[-1])
-                caption = (
-                    f"⚡ [비트코인(BTC/USDT) 포착 - TradingView]\n"
-                    f"• 타임프레임: {tf}\n"
-                    f"• 상태: {line_name} (오차 0.1% 터치)\n"
-                    f"• 현재가: ${curr_price:,.2f}\n"
-                    f"• 해당 이평선: ${val:,.2f}"
+                alert_text = (
+                    f"⚡ *[비트코인(BTC/USDT) 포착]*\n"
+                    f"• *타임프레임:* `{tf}`\n"
+                    f"• *상태:* {line_name} (오차 0.1% 접촉)\n"
+                    f"• *현재가:* `${curr_price:,.2f}`\n"
+                    f"• *이평선 가격:* `${val:,.2f}`"
                 )
-                print(f"[{tf}] 포착 성공: {line_name}")
-                
-                chart_file = None
-                try:
-                    chart_file = create_btc_chart(df, tf, line_name)
-                    send_telegram_photo(chart_file, caption=caption)
-                except Exception as chart_err:
-                    print(f"차트 생성/전송 오류 ({tf}): {chart_err}")
-                    send_telegram_msg(caption)
-
-                if chart_file and os.path.exists(chart_file):
-                    os.remove(chart_file)
-                
-                found_support = True
-                any_matched = True
+                matched_alerts.append(alert_text)
+                found = True
                 break
 
-        if not found_support:
-            status_reports.append(f"• {tf}: 정배열 충족, 이평선(±0.1%) 미접촉")
-            print(f"[{tf}] 이평선 0.1% 범위 터치 없음")
+        if not found:
+            status_reports.append(f"• `{tf}`: 정배열 충족, 이평선 미접촉")
 
     except Exception as e:
         print(f"비트코인 스캔 에러 ({tf}): {e}")
-        status_reports.append(f"• {tf}: 조회 실패 ({e})")
-        continue
+        status_reports.append(f"• `{tf}`: 데이터 조회 실패")
 
-if not any_matched:
+# 3. 텔레그램 결과 전송
+if matched_alerts:
+    final_msg = "\n\n" + "\n\n---\n\n".join(matched_alerts)
+    send_telegram_msg(final_msg)
+else:
     report_text = (
-        "ℹ️ [BTC/USDT 스캔 안내 - TradingView]\n"
-        "현재 조건(정배열 + 이평선 ±0.1% 터치)에 부합하는 타임프레임이 없습니다.\n\n"
-        "[타임프레임별 상태 요약]\n" + "\n".join(status_reports)
+        "ℹ️ *[BTC/USDT 스캔 안내]*\n"
+        "현재 조건(정배열 + 이평선 ±0.1% 터치)에 부합하는 구간이 없습니다.\n\n"
+        "*[타임프레임별 현황]*\n" + "\n".join(status_reports)
     )
     send_telegram_msg(report_text)
 
-print("=== BTC 스캐너 완료 ===")
+print("=== 비트코인 스캐너 완료 ===")
