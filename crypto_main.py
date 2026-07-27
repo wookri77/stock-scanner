@@ -67,13 +67,10 @@ def create_btc_chart(df, timeframe, line_type):
     plt.close('all')
     return file_name
 
-# 3. 바이낸스 선물 거래소 데이터 조회
-exchange = ccxt.binance({
+# 3. 바이비트(Bybit) 거래소 연결 (GitHub Actions IP 차단 없음)
+exchange = ccxt.bybit({
     'timeout': 20000,
     'enableRateLimit': True,
-    'options': {
-        'defaultType': 'future'
-    }
 })
 
 TIMEFRAMES = ["5m", "1h", "4h", "12h", "1d"]
@@ -85,9 +82,9 @@ status_reports = []
 
 for tf in TIMEFRAMES:
     try:
-        # 과도한 요청 방지 간격
-        time.sleep(0.5)
+        time.sleep(0.3)
 
+        # Bybit BTC/USDT 데이터 수집
         ohlcv = exchange.fetch_ohlcv("BTC/USDT", timeframe=tf, limit=1000)
         df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
@@ -169,7 +166,7 @@ for tf in TIMEFRAMES:
 
     except Exception as e:
         print(f"비트코인 스캔 에러 ({tf}): {e}")
-        status_reports.append(f"• {tf}: 조회 실패 및 에러 ({e})")
+        status_reports.append(f"• {tf}: 조회 실패 및 에러")
         continue
 
 # 조건에 부합하는 타임프레임이 하나도 없을 때 안내 메시지 발송
