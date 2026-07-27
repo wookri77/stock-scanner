@@ -16,35 +16,46 @@ def send_telegram_msg(text):
         except Exception as e:
             print(f"텔레그램 전송 실패: {e}")
 
-# 2. 국내/해외 시가총액 상위 종목 리스트 수집
+# 2. 국내/해외 주요 종목 리스트 수집
 def get_target_tickers():
     target_dict = {}
 
-    # A. 미국 S&P 500 / 나스닥 상위 300개 티커
-    print("미국 주요 300개 종목 수집 중...")
+    # A. 미국 주요 종목 (S&P 500 크롤링 + 핵심 백업)
+    print("미국 주요 종목 수집 중...")
     try:
         sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         tables = pd.read_html(sp500_url)
         us_df = tables[0]
-        us_tickers = us_df['Symbol'].str.replace('.', '-').tolist()[:300]
+        us_tickers = us_df['Symbol'].str.replace('.', '-').tolist()[:250]
         for ticker in us_tickers:
             target_dict[ticker] = ticker
     except Exception as e:
-        print(f"미국 종목 수집 오류: {e}")
+        print(f"미국 크롤링 예외: {e}")
 
-    # B. 한국 코스피/코스닥 상위 300개 티커
-    print("한국 주요 300개 종목 수집 중...")
+    us_backup = ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "NFLX", "INTC"]
+    for t in us_backup:
+        target_dict[t] = t
+
+    # B. 한국 주요 종목 (KRX 크롤링 + 핵심 백업)
+    print("한국 주요 종목 수집 중...")
     try:
         krx_url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
         krx_df = pd.read_html(krx_url, header=0)[0]
         krx_df['종목코드'] = krx_df['종목코드'].map('{:06d}'.format)
         
-        for _, row in krx_df.head(300).iterrows():
+        for _, row in krx_df.head(250).iterrows():
             code = row['종목코드']
             name = row['회사명']
             target_dict[f"{name}"] = f"{code}.KS"
     except Exception as e:
-        print(f"한국 종목 수집 오류: {e}")
+        print(f"한국 크롤링 예외: {e}")
+
+    kr_backup = {
+        "삼성전자": "005930.KS", "SK하이닉스": "000660.KS", "LG에너지솔루션": "373220.KS",
+        "삼성바이오로직스": "207940.KS", "현대차": "005380.KS", "기아": "000270.KS",
+        "셀트리온": "068270.KS", "KB금융": "105560.KS", "NAVER": "035420.KS"
+    }
+    target_dict.update(kr_backup)
 
     return target_dict
 
@@ -61,13 +72,13 @@ for name, symbol in TARGET_STOCKS.items():
         print(f"진행 상황: {count}/{len(TARGET_STOCKS)} 종목 분석 완료...")
 
     try:
-        # 3년치 일봉 데이터 다운로드
+        # 3년치 일봉 데이터 불러오기
         df = yf.download(symbol, period="3y", progress=False)
-        if len(df) < 460:
+        if df.empty or len(df) < 450:
             if symbol.endswith(".KS"):
                 symbol = symbol.replace(".KS", ".KQ")
                 df = yf.download(symbol, period="3y", progress=False)
-                if len(df) < 460:
+                if df.empty or len(df) < 450:
                     continue
             else:
                 continue
@@ -80,59 +91,58 @@ for name, symbol in TARGET_STOCKS.items():
         if isinstance(low, pd.DataFrame): low = low.iloc[:, 0]
         if isinstance(high, pd.DataFrame): high = high.iloc[:, 0]
 
-        # 주요 장기 이동평균선 계산 (112, 224, 448일선)
+        # 장기 이동평균선 계산
         ma112 = close.rolling(112).mean()
         ma224 = close.rolling(224).mean()
         ma448 = close.rolling(448).mean()
 
-        # 최근 120봉(약 6개월) 데이터 슬라이싱
-        lookback = 120
-        recent_ma112 = ma112.iloc[-lookback:]
-        recent_ma224 = ma224.iloc[-lookback:]
-        recent_ma448 = ma448.iloc[-lookback:]
-        recent_low = low.iloc[-lookback:]
-        recent_high = high.iloc[-lookback:]
+        # [조건 1] 최근 6개월(120봉) 이내에 112 > 224 > 448 정배열 흐름이 존재했었는지 확인
+        lookback_6m = 120
+        recent_112 = ma112.iloc[-lookback_6m:]
+        recent_224 = ma224.iloc[-lookback_6m:]
+        recent_448 = ma448.iloc[-lookback_6m:]
 
-        # 조건 1: 대세 장기 정배열 추세 판정 (112일선 > 224일선 > 448일선 우상향)
-        long_term_alignment = (
-            (recent_ma112 > recent_ma224) & 
-            (recent_ma224 > recent_ma448)
-        )
+        alignment_6m = (recent_112 > recent_224) & (recent_224 > recent_448)
+        if not alignment_6m.any():
+            continue  # 최근 6개월 내 정배열 추세가 없었다면 스킵
 
-        if not long_term_alignment.any():
+        # [조건 2] 최근 3일 봉(오늘, 어제, 그저께) 중 장기 이평선 터치/지지가 발생했는지 직접 확인
+        recent_low = low.iloc[-3:]
+        recent_high = high.iloc[-3:]
+        recent_ma112 = ma112.iloc[-3:]
+        recent_ma224 = ma224.iloc[-3:]
+        recent_ma448 = ma448.iloc[-3:]
+
+        curr_price = close.iloc[-1]
+
+        # A. 112일선 지지 체크 (저가가 112일선 -3% ~ +2% 사이에 닿은 경우)
+        touch_112 = (recent_low <= recent_ma112 * 1.02) & (recent_high >= recent_ma112 * 0.97)
+        if touch_112.any():
+            val = ma112.iloc[-1]
+            matched_stocks.append(f"• *{name}* ({symbol})\n  - 🟠 [112일선 지지] 현재가: {curr_price:,.2f} / 112선: {val:,.2f}")
             continue
 
-        align_indices = long_term_alignment[long_term_alignment].index
-        last_align_idx = align_indices[-1]
+        # B. 224일선 지지 체크
+        touch_224 = (recent_low <= recent_ma224 * 1.02) & (recent_high >= recent_ma224 * 0.97)
+        if touch_224.any():
+            val = ma224.iloc[-1]
+            matched_stocks.append(f"• *{name}* ({symbol})\n  - 🔴 [224일선 지지] 현재가: {curr_price:,.2f} / 224선: {val:,.2f}")
+            continue
 
-        post_align_low = recent_low.loc[last_align_idx:]
-        post_align_high = recent_high.loc[last_align_idx:]
-        post_align_ma112 = recent_ma112.loc[last_align_idx:]
-
-        # 조건 2: 112일선 지지/터치 (오차범위 -3% ~ +3%로 설정)
-        touch_112 = (post_align_low <= post_align_ma112 * 1.03) & (post_align_high >= post_align_ma112 * 0.97)
-        touch_indices = touch_112[touch_112].index
-
-        # 조건 3: 정배열 추세 중 '첫 번째' 112일선 지지가 '최근 3일 이내(오늘 포함)'에 발생했는지 확인
-        if len(touch_indices) > 0:
-            first_touch_date = touch_indices[0]
-            recent_3_days = df.index[-3:]
-            
-            if first_touch_date in recent_3_days:
-                curr_price = close.iloc[-1]
-                val_112 = ma112.iloc[-1]
-                matched_stocks.append(
-                    f"• *{name}* ({symbol})\n"
-                    f"  - 현재가: {curr_price:,.2f} / 112일선: {val_112:,.2f}"
-                )
+        # C. 448일선 지지 체크
+        touch_448 = (recent_low <= recent_ma448 * 1.02) & (recent_high >= recent_ma448 * 0.97)
+        if touch_448.any():
+            val = ma448.iloc[-1]
+            matched_stocks.append(f"• *{name}* ({symbol})\n  - ⚪ [448일선 지지] 현재가: {curr_price:,.2f} / 448선: {val:,.2f}")
+            continue
 
     except Exception as e:
         continue
 
-# 4. 결과 텔레그램 전송
+# 4. 결과 전송
 if matched_stocks:
-    msg = f"🎯 **[장기 정배열 추세 ➔ 112일선 첫 지지 포착!]**\n\n" + "\n\n".join(matched_stocks)
+    msg = f"🎯 **[장기 이평선(112/224/448) 지지 타점 포착!]**\n\n" + "\n\n".join(matched_stocks)
 else:
-    msg = "🔍 오늘 600개 주요 종목 중 장기 정배열 후 112일선 '첫 번째' 지지가 발생한 종목이 없습니다."
+    msg = "🔍 오늘 주요 종목 중 장기 이평선(112/224/448일선) 지지가 발생한 종목이 없습니다."
 
 send_telegram_msg(msg)
