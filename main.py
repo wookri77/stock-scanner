@@ -29,32 +29,14 @@ def send_telegram_photo(photo_path, caption=""):
         except Exception as e:
             print(f"텔레그램 사진 전송 실패: {e}")
 
-# 2. 차트 생성 함수 (데이터 구조 오류 수정)
-def create_stock_chart(df, name, symbol, line_type):
-    # 최근 120봉 분량 슬라이싱
-    chart_df = df.iloc[-120:].copy()
+# 2. 차트 생성 함수 (MultiIndex 및 단일 시리즈 오류 완벽 방어)
+def create_stock_chart(clean_df, name, symbol, line_type):
+    chart_df = clean_df.iloc[-120:].copy()
     
-    # yfinance MultiIndex 컬럼 문제 강제 정리
-    if isinstance(chart_df.columns, pd.MultiIndex):
-        chart_df.columns = chart_df.columns.get_level_values(0)
-
-    close_series = chart_df['Close']
-    if isinstance(close_series, pd.DataFrame):
-        close_series = close_series.iloc[:, 0]
-
-    # 이평선 계산
-    ma112 = close_series.rolling(112).mean()
-    ma224 = close_series.rolling(224).mean()
-    ma448 = close_series.rolling(448).mean()
-
-    # 차트용 데이터프레감 필수 컬럼만 정제
-    clean_df = pd.DataFrame({
-        'Open': chart_df['Open'].iloc[:, 0] if isinstance(chart_df['Open'], pd.DataFrame) else chart_df['Open'],
-        'High': chart_df['High'].iloc[:, 0] if isinstance(chart_df['High'], pd.DataFrame) else chart_df['High'],
-        'Low': chart_df['Low'].iloc[:, 0] if isinstance(chart_df['Low'], pd.DataFrame) else chart_df['Low'],
-        'Close': close_series,
-        'Volume': chart_df['Volume'].iloc[:, 0] if isinstance(chart_df['Volume'], pd.DataFrame) else chart_df['Volume']
-    }, index=chart_df.index)
+    close_s = chart_df['Close']
+    ma112 = close_s.rolling(112).mean()
+    ma224 = close_s.rolling(224).mean()
+    ma448 = close_s.rolling(448).mean()
 
     add_plots = [
         mpf.makeaddplot(ma112, color='orange', width=1.5),
@@ -67,7 +49,7 @@ def create_stock_chart(df, name, symbol, line_type):
 
     file_name = f"{symbol}_chart.png"
     mpf.plot(
-        clean_df,
+        chart_df,
         type='candle',
         style=s,
         addplot=add_plots,
@@ -104,17 +86,31 @@ for name, symbol in TARGET_STOCKS.items():
         if df.empty or len(df) < 450:
             continue
 
-        close = df['Close']
-        low = df['Low']
-        high = df['High']
+        # yfinance의 MultiIndex 형태를 순수 단일 컬럼으로 추출
+        def extract_series(data_frame, col_name):
+            val = data_frame[col_name]
+            if isinstance(val, pd.DataFrame):
+                return val.iloc[:, 0]
+            return val
 
-        if isinstance(close, pd.DataFrame): close = close.iloc[:, 0]
-        if isinstance(low, pd.DataFrame): low = low.iloc[:, 0]
-        if isinstance(high, pd.DataFrame): high = high.iloc[:, 0]
+        open_s = extract_series(df, 'Open')
+        high_s = extract_series(df, 'High')
+        low_s = extract_series(df, 'Low')
+        close_s = extract_series(df, 'Close')
+        volume_s = extract_series(df, 'Volume')
 
-        ma112 = close.rolling(112).mean()
-        ma224 = close.rolling(224).mean()
-        ma448 = close.rolling(448).mean()
+        # 분석용 및 차트용 깔끔한 정제 DataFrame 생성
+        clean_df = pd.DataFrame({
+            'Open': open_s,
+            'High': high_s,
+            'Low': low_s,
+            'Close': close_s,
+            'Volume': volume_s
+        }, index=df.index)
+
+        ma112 = close_s.rolling(112).mean()
+        ma224 = close_s.rolling(224).mean()
+        ma448 = close_s.rolling(448).mean()
 
         # 최근 6개월 정배열 이력 확인
         recent_112 = ma112.iloc[-120:]
@@ -126,13 +122,13 @@ for name, symbol in TARGET_STOCKS.items():
             continue
 
         # 최근 3일 이내 지지 확인
-        recent_low = low.iloc[-3:]
-        recent_high = high.iloc[-3:]
+        recent_low = low_s.iloc[-3:]
+        recent_high = high_s.iloc[-3:]
         recent_ma112 = ma112.iloc[-3:]
         recent_ma224 = ma224.iloc[-3:]
         recent_ma448 = ma448.iloc[-3:]
 
-        curr_price = close.iloc[-1]
+        curr_price = close_s.iloc[-1]
         detected = False
         line_info = ""
         val = 0
@@ -154,16 +150,20 @@ for name, symbol in TARGET_STOCKS.items():
             matched_count += 1
             caption = f"🎯 *[{name}]* ({symbol})\n• 상태: *{line_info}*\n• 현재가: {curr_price:,.2f} / 해당 이평선: {val:,.2f}"
             
-            # 차트 이미지 생성 및 전송
-            chart_file = create_stock_chart(df, name, symbol, line_info)
-            send_telegram_photo(chart_file, caption=caption)
-            
-            if os.path.exists(chart_file):
-                os.remove(chart_file)
+            # 차트 생성이 실패하더라도 텍스트 알림은 무조건 가도록 예외 처리
+            try:
+                chart_file = create_stock_chart(clean_df, name, symbol, line_info)
+                send_telegram_photo(chart_file, caption=caption)
+                if os.path.exists(chart_file):
+                    os.remove(chart_file)
+            except Exception as chart_err:
+                print(f"차트 생성 실패 ({symbol}): {chart_err}")
+                send_telegram_msg(caption)
 
     except Exception as e:
-        print(f"Error on {symbol}: {e}")
+        print(f"종목 오류 ({symbol}): {e}")
         continue
 
+# 포착 종목이 없을 때도 반드시 마무리 메시지 전송
 if matched_count == 0:
     send_telegram_msg("🔍 오늘 주요 종목 중 장기 이평선(112/224/448일선) 지지가 발생한 종목이 없습니다.")
