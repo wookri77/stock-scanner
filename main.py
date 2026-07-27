@@ -5,7 +5,7 @@ import yfinance as yf
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 
-# 텔레그램 설정
+# 1. 텔레그램 환경변수 설정
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -31,7 +31,8 @@ def send_telegram_photo(photo_path, caption=""):
         except Exception as e:
             print(f"텔레그램 사진 전송 예외: {e}")
 
-def create_stock_chart(clean_df, symbol, line_type):
+# 2. 차트 생성 함수 (종목명 포함)
+def create_stock_chart(clean_df, name, symbol, line_type):
     chart_df = clean_df.iloc[-120:].copy()
     
     close_s = chart_df['Close']
@@ -39,7 +40,6 @@ def create_stock_chart(clean_df, symbol, line_type):
     ma224 = close_s.rolling(224).mean()
     ma448 = close_s.rolling(448).mean()
 
-    # mpf.make_addplot (오타 수정완료)
     add_plots = [
         mpf.make_addplot(ma112, color='orange', width=1.5),
         mpf.make_addplot(ma224, color='red', width=1.5),
@@ -55,7 +55,7 @@ def create_stock_chart(clean_df, symbol, line_type):
         type='candle',
         style=s,
         addplot=add_plots,
-        title=f"\n{symbol} - {line_type}",
+        title=f"\n{name} ({symbol}) - {line_type}",
         savefig=file_name,
         volume=False,
         figratio=(12, 7),
@@ -64,43 +64,62 @@ def create_stock_chart(clean_df, symbol, line_type):
     plt.close('all')
     return file_name
 
-def get_stock_tickers():
-    tickers = []
-    
-    # 1. 미국 주요 300개 티커 동적 가져오기 (S&P 500 위키피디아)
+# 3. 미국(300개) + 한국(300개) 종목명 및 티커 수집
+def get_stock_dictionary():
+    stock_dict = {}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+    # [미국] S&P 500 종목명 & 티커 300개 수집
     try:
         sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        tables = pd.read_html(sp500_url)
-        us_tickers = tables[0]['Symbol'].str.replace('.', '-').tolist()[:300]
-        tickers.extend(us_tickers)
-        print(f"미국 주식 {len(us_tickers)}개 티커 수집 완료")
+        req = requests.get(sp500_url, headers=headers)
+        tables = pd.read_html(req.text)
+        df_us = tables[0][['Symbol', 'Security']].iloc[:300]
+        for _, row in df_us.iterrows():
+            sym = str(row['Symbol']).replace('.', '-')
+            name = str(row['Security'])
+            stock_dict[name] = sym
+        print(f"미국 주식 {len(stock_dict)}개 종목 수집 완료")
     except Exception as e:
-        print(f"미국 티커 수집 실패, 기본 목록 사용: {e}")
-        tickers.extend(["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "NFLX", "INTC", "PLTR", "COIN"])
+        print(f"미국 종목 크롤링 예외: {e}")
 
-    # 2. 한국 대표 300개 티커 (네이버/KOSPI/KOSDAQ 주요 상위 종목 코드)
-    # yfinance 포맷에 맞춰 .KS, .KQ 붙임
-    kr_base_codes = [
-        "005930", "000660", "005380", "035420", "035720", "373220", "207940", "000270", "068270", "105560",
-        "005490", "247540", "086520", "006400", "051910", "003550", "012330", "000810", "066570", "032830",
-        "055550", "015760", "018260", "033780", "009150", "011200", "010140", "034730", "010130", "003670",
-        "009540", "030200", "017670", "096770", "000150", "036570", "005935", "086790", "010950", "259960"
-    ]
-    # 필요시 추가 커스텀 가능, .KS 및 .KQ 구분 결합
-    kr_tickers = [f"{code}.KS" for code in kr_base_codes]
-    tickers.extend(kr_tickers)
-    
-    return tickers
+    # [한국] 네이버 금융 시가총액 상위 종목 수집 (KOSPI & KOSDAQ 상위 300개)
+    kr_count = 0
+    for page in range(1, 7): # 페이지당 50개씩 총 300개
+        for sosok in [0, 1]: # 0: 코스피, 1: 코스닥
+            try:
+                url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+                res = requests.get(url, headers=headers)
+                df_list = pd.read_html(res.text, encoding='euc-kr')
+                df_kr = df_list[1].dropna(how='all')
+                
+                # HTML에서 종목 코드 및 종목명 추출
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(res.text, 'html.parser')
+                links = soup.select("table.type_2 a.tlto")
+                
+                for link in links:
+                    code = link['href'].split('code=')[-1]
+                    name = link.text.strip()
+                    suffix = ".KS" if sosok == 0 else ".KQ"
+                    symbol = f"{code}{suffix}"
+                    if name not in stock_dict:
+                        stock_dict[name] = symbol
+                        kr_count += 1
+            except Exception as e:
+                continue
 
-send_telegram_msg("🚀 [주식/암호화폐 통합 스캐너] 스캔을 시작합니다.")
+    print(f"한국 주식 {kr_count}개 종목 수집 완료 (전체 스캔 대상: {len(stock_dict)}개)")
+    return stock_dict
 
-TARGET_TICKERS = get_stock_tickers()
-print(f"총 {len(TARGET_TICKERS)}개 종목 스캔을 시작합니다...")
+# 4. 분석 실행
+send_telegram_msg("🚀 [주식 이평선 스캐너] 스캔을 시작합니다.")
 
+TARGET_STOCKS = get_stock_dictionary()
 matched_summary = []
 matched_charts = []
 
-for symbol in TARGET_TICKERS:
+for name, symbol in TARGET_STOCKS.items():
     try:
         df = yf.download(symbol, period="3y", progress=False)
         if df.empty or len(df) < 450:
@@ -173,13 +192,17 @@ for symbol in TARGET_TICKERS:
             fmt_price = f"{curr_price:,.0f}" if unit == "원" else f"{curr_price:,.2f}"
             fmt_val = f"{val:,.0f}" if unit == "원" else f"{val:,.2f}"
 
-            item_text = f"📌 {symbol}\n• 현재가: {fmt_price}{unit}\n• 상태: {line_info} (이평선: {fmt_val}{unit})"
+            item_text = (
+                f"📌 {name} ({symbol})\n"
+                f"• 현재가: {fmt_price}{unit}\n"
+                f"• 상태: {line_info} (이평선: {fmt_val}{unit})"
+            )
             matched_summary.append(item_text)
 
-            caption = f"🎯 [{symbol}]\n• 상태: {line_info}\n• 현재가: {fmt_price}{unit} / 이평선: {fmt_val}{unit}"
+            caption = f"🎯 [{name}] ({symbol})\n• 상태: {line_info}\n• 현재가: {fmt_price}{unit} / 이평선: {fmt_val}{unit}"
             
             try:
-                chart_file = create_stock_chart(clean_df, symbol, line_info)
+                chart_file = create_stock_chart(clean_df, name, symbol, line_info)
                 matched_charts.append((chart_file, caption))
             except Exception as chart_err:
                 print(f"차트 생성 실패 ({symbol}): {chart_err}")
@@ -187,10 +210,13 @@ for symbol in TARGET_TICKERS:
     except Exception as e:
         continue
 
-# 최종 전송
+# 5. 최종 알림 발송
 if matched_summary:
     divider = "\n" + "-" * 28 + "\n\n"
-    summary_text = f"🎯 [주식 장기 이평선 지지 종목 포착 ({len(matched_summary)}건)]\n\n" + divider.join(matched_summary)
+    summary_text = (
+        f"🎯 [주식 장기 이평선 지지 종목 포착 ({len(matched_summary)}건)]\n\n"
+        + divider.join(matched_summary)
+    )
     send_telegram_msg(summary_text)
 
     for chart_file, caption in matched_charts:
@@ -198,4 +224,4 @@ if matched_summary:
         if chart_file and os.path.exists(chart_file):
             os.remove(chart_file)
 else:
-    send_telegram_msg("🔍 주식 종목 중 장기 이평선 조건에 부합하는 종목이 없습니다.")
+    send_telegram_msg("🔍 오늘 주요 종목 중 장기 이평선(112/224/448일선) 지지가 발생한 종목이 없습니다.")
