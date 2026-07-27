@@ -12,7 +12,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 def send_telegram_msg(text):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
         try:
             requests.post(url, json=payload)
         except Exception as e:
@@ -23,11 +23,13 @@ def send_telegram_photo(photo_path, caption=""):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
         try:
             with open(photo_path, 'rb') as photo:
-                payload = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "Markdown"}
+                payload = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
                 files = {"photo": photo}
-                requests.post(url, data=payload, files=files)
+                res = requests.post(url, data=payload, files=files)
+                if not res.ok:
+                    print(f"사진 전송 응답 오류 ({photo_path}): {res.text}")
         except Exception as e:
-            print(f"텔레그램 사진 전송 실패: {e}")
+            print(f"텔레그램 사진 전송 예외: {e}")
 
 # 2. 차트 생성 함수
 def create_stock_chart(clean_df, name, symbol, line_type):
@@ -86,11 +88,9 @@ for name, symbol in TARGET_STOCKS.items():
         if df.empty or len(df) < 450:
             continue
 
-        # yfinance 데이터 칼럼 평탄화 (MultiIndex 및 1차원 추출 방어)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 결측치 제거 및 단일 Series로 변환
         def clean_series(data):
             if isinstance(data, pd.DataFrame):
                 data = data.iloc[:, 0]
@@ -117,7 +117,6 @@ for name, symbol in TARGET_STOCKS.items():
         ma224 = close_s.rolling(224).mean()
         ma448 = close_s.rolling(448).mean()
 
-        # 최근 6개월 정배열 이력 확인
         recent_112 = ma112.iloc[-120:]
         recent_224 = ma224.iloc[-120:]
         recent_448 = ma448.iloc[-120:]
@@ -126,45 +125,45 @@ for name, symbol in TARGET_STOCKS.items():
         if not alignment_6m.any():
             continue
 
-        # 최근 3일 이내 지지 확인
         recent_low = low_s.iloc[-3:]
         recent_high = high_s.iloc[-3:]
         recent_ma112 = ma112.iloc[-3:]
         recent_ma224 = ma224.iloc[-3:]
         recent_ma448 = ma448.iloc[-3:]
 
-        # nan 방지를 위해 dropna 처리 후 유효한 마지막 값 가져오기
-        curr_price = close_s.dropna().iloc[-1]
+        curr_price = float(close_s.dropna().iloc[-1])
         
         detected = False
         line_info = ""
-        val = 0
+        val = 0.0
 
         if ((recent_low <= recent_ma112 * 1.02) & (recent_high >= recent_ma112 * 0.97)).any():
             detected = True
             line_info = "112일선 지지"
-            val = ma112.dropna().iloc[-1]
+            val = float(ma112.dropna().iloc[-1])
         elif ((recent_low <= recent_ma224 * 1.02) & (recent_high >= recent_ma224 * 0.97)).any():
             detected = True
             line_info = "224일선 지지"
-            val = ma224.dropna().iloc[-1]
+            val = float(ma224.dropna().iloc[-1])
         elif ((recent_low <= recent_ma448 * 1.02) & (recent_high >= recent_ma448 * 0.97)).any():
             detected = True
             line_info = "448일선 지지"
-            val = ma448.dropna().iloc[-1]
+            val = float(ma448.dropna().iloc[-1])
 
         if detected:
             matched_count += 1
-            caption = f"🎯 *[{name}]* ({symbol})\n• 상태: *{line_info}*\n• 현재가: {curr_price:,.2f} / 해당 이평선: {val:,.2f}"
+            caption = f"🎯 [{name}] ({symbol})\n• 상태: {line_info}\n• 현재가: {curr_price:,.2f} / 해당 이평선: {val:,.2f}"
             
+            chart_file = None
             try:
                 chart_file = create_stock_chart(clean_df, name, symbol, line_info)
                 send_telegram_photo(chart_file, caption=caption)
-                if os.path.exists(chart_file):
-                    os.remove(chart_file)
             except Exception as chart_err:
                 print(f"차트 생성 실패 ({symbol}): {chart_err}")
                 send_telegram_msg(caption)
+
+            if chart_file and os.path.exists(chart_file):
+                os.remove(chart_file)
 
     except Exception as e:
         print(f"종목 오류 ({symbol}): {e}")
