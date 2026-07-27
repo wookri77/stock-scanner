@@ -5,7 +5,7 @@ import ccxt
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 
-# 1. 텔레그램 환경변수
+# 1. 텔레그램 환경변수 설정
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -31,7 +31,7 @@ def send_telegram_photo(photo_path, caption=""):
         except Exception as e:
             print(f"텔레그램 사진 전송 예외: {e}")
 
-# 2. 비트코인 차트 생성 함수 (EMA 112, 224, 448, 896)
+# 2. 비트코인 차트 생성 함수 (EMA 112, 224, 448, 896 적용)
 def create_btc_chart(df, timeframe, line_type):
     chart_df = df.iloc[-150:].copy()
     
@@ -106,7 +106,7 @@ for tf in TIMEFRAMES:
         is_aligned = alignment_full.any() or alignment_main.any()
 
         if not is_aligned:
-            status_reports.append(f"• {tf}: 정배열 미충족")
+            status_reports.append(f"• {tf}: 최근 300캔들 내 정배열 미충족")
             print(f"[{tf}] 최근 300캔들 내 정배열 미충족 스킵")
             continue
 
@@ -160,12 +160,16 @@ for tf in TIMEFRAMES:
 
     except Exception as e:
         print(f"비트코인 스캔 에러 ({tf}): {e}")
-        status_reports.append(f"• {tf}: 에러 발생")
+        status_reports.append(f"• {tf}: 조회 실패 및 에러")
         continue
 
-# 조건에 부합하는 타임프레임이 하나도 없을 때 텔레그램 메시지 발송
+# 조건에 부합하는 타임프레임이 하나도 없을 때 안내 메시지 발송
 if not any_matched:
-    report_text = "ℹ️ [BTC/USDT 스캔 안내]\n현재 조건(정배열 + 이평선 ±0.1% 터치)에 부합하는 타임프레임이 없습니다.\n\n[타임프레임별 상태]\n" + "\n".join(status_reports)
+    report_text = (
+        "ℹ️ [BTC/USDT 스캔 안내]\n"
+        "현재 조건(정배열 + 이평선 ±0.1% 터치)에 부합하는 타임프레임이 없습니다.\n\n"
+        "[타임프레임별 상태 요약]\n" + "\n".join(status_reports)
+    )
     send_telegram_msg(report_text)
 
 print("=== BTC 스캐너 완료 ===")
