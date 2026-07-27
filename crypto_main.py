@@ -25,25 +25,27 @@ def send_telegram_photo(photo_path, caption=""):
             with open(photo_path, 'rb') as photo:
                 payload = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
                 files = {"photo": photo}
-                requests.post(url, data=payload, files=files)
+                res = requests.post(url, data=payload, files=files)
+                if not res.ok:
+                    print(f"사진 전송 응답 오류 ({photo_path}): {res.text}")
         except Exception as e:
-            print(f"텔레그램 사진 전송 실패: {e}")
+            print(f"텔레그램 사진 전송 예외: {e}")
 
-# 2. 비트코인 차트 생성 함수 (112, 224, 448, 896 이평선 적용)
+# 2. 비트코인 차트 생성 함수 (EMA 112, 224, 448, 896 적용)
 def create_btc_chart(df, timeframe, line_type):
-    chart_df = df.iloc[-120:].copy()
+    chart_df = df.iloc[-150:].copy()
     
     close_s = chart_df['Close']
-    ma112 = close_s.rolling(112).mean()
-    ma224 = close_s.rolling(224).mean()
-    ma448 = close_s.rolling(448).mean()
-    ma896 = close_s.rolling(896).mean()
+    ema112 = close_s.ewm(span=112, adjust=False).mean()
+    ema224 = close_s.ewm(span=224, adjust=False).mean()
+    ema448 = close_s.ewm(span=448, adjust=False).mean()
+    ema896 = close_s.ewm(span=896, adjust=False).mean()
 
     add_plots = [
-        mpf.makeaddplot(ma112, color='orange', width=1.2),
-        mpf.makeaddplot(ma224, color='red', width=1.2),
-        mpf.makeaddplot(ma448, color='purple', width=1.2),
-        mpf.makeaddplot(ma896, color='green', width=1.2)
+        mpf.makeaddplot(ema112, color='orange', width=1.2),
+        mpf.makeaddplot(ema224, color='red', width=1.2),
+        mpf.makeaddplot(ema448, color='purple', width=1.2),
+        mpf.makeaddplot(ema896, color='green', width=1.2)
     ]
 
     mc = mpf.make_marketcolors(up='red', down='blue', edge='inherit', wick='inherit')
@@ -64,18 +66,15 @@ def create_btc_chart(df, timeframe, line_type):
     plt.close('all')
     return file_name
 
-# 3. 바이낸스 거래소 객체 생성
+# 3. 바이낸스 거래소 데이터 조회
 exchange = ccxt.binance()
 
-# 검사할 타임프레임 목록 (5분, 1시간, 4시간, 12시간, 1일)
 TIMEFRAMES = ["5m", "1h", "4h", "12h", "1d"]
-
-matched_count = 0
 
 for tf in TIMEFRAMES:
     try:
-        # 896이평선을 계산하기 위해 최소 1000개 이상의 캔들 데이터 수집
-        ohlcv = exchange.fetch_ohlcv("BTC/USDT", timeframe=tf, limit=1000)
+        # EMA896 계산 및 충분한 300캔들 검사를 위해 1800개 데이터 수집
+        ohlcv = exchange.fetch_ohlcv("BTC/USDT", timeframe=tf, limit=1800)
         df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
         df.set_index('Timestamp', inplace=True)
@@ -84,72 +83,63 @@ for tf in TIMEFRAMES:
         low_s = df['Low']
         high_s = df['High']
 
-        # 4대 이평선 계산
-        ma112 = close_s.rolling(112).mean()
-        ma224 = close_s.rolling(224).mean()
-        ma448 = close_s.rolling(448).mean()
-        ma896 = close_s.rolling(896).mean()
+        # EMA (지수이동평균) 계산
+        ema112 = close_s.ewm(span=112, adjust=False).mean()
+        ema224 = close_s.ewm(span=224, adjust=False).mean()
+        ema448 = close_s.ewm(span=448, adjust=False).mean()
+        ema896 = close_s.ewm(span=896, adjust=False).mean()
 
-        # 최근 100개 캔들 동안 정배열(112 > 224 > 448 > 896) 이력 확인
-        recent_112 = ma112.iloc[-100:]
-        recent_224 = ma224.iloc[-100:]
-        recent_448 = ma448.iloc[-100:]
-        recent_896 = ma896.iloc[-100:]
+        # 최근 300개 캔들 내 정배열(112 > 224 > 448 > 896) 형성 이력 확인
+        recent_112 = ema112.iloc[-300:]
+        recent_224 = ema224.iloc[-300:]
+        recent_448 = ema448.iloc[-300:]
+        recent_896 = ema896.iloc[-300:]
 
         alignment = (recent_112 > recent_224) & (recent_224 > recent_448) & (recent_448 > recent_896)
         if not alignment.any():
+            print(f"[{tf}] 최근 300캔들 내 정배열 조건 미충족")
             continue
 
-        # 최근 3개 캔들 내에서 이평선 지지(±2% 오차범위) 체크
-        recent_low = low_s.iloc[-3:]
-        recent_high = high_s.iloc[-3:]
-        recent_ma112 = ma112.iloc[-3:]
-        recent_ma224 = ma224.iloc[-3:]
-        recent_ma448 = ma448.iloc[-3:]
-        recent_ma896 = ma896.iloc[-3:]
+        # 최근 5개 캔들 내 이평선 지지(±2.5% 범위) 검사
+        recent_low = low_s.iloc[-5:]
+        recent_high = high_s.iloc[-5:]
 
         curr_price = float(close_s.iloc[-1])
-        detected = False
-        line_info = ""
-        val = 0.0
 
-        if ((recent_low <= recent_ma112 * 1.015) & (recent_high >= recent_ma112 * 0.985)).any():
-            detected = True
-            line_info = "112이평 지지"
-            val = float(ma112.dropna().iloc[-1])
-        elif ((recent_low <= recent_ma224 * 1.015) & (recent_high >= recent_ma224 * 0.985)).any():
-            detected = True
-            line_info = "224이평 지지"
-            val = float(ma224.dropna().iloc[-1])
-        elif ((recent_low <= recent_ma448 * 1.015) & (recent_high >= recent_ma448 * 0.985)).any():
-            detected = True
-            line_info = "448이평 지지"
-            val = float(ma448.dropna().iloc[-1])
-        elif ((recent_low <= recent_ma896 * 1.015) & (recent_high >= recent_ma896 * 0.985)).any():
-            detected = True
-            line_info = "896이평 지지"
-            val = float(ma896.dropna().iloc[-1])
+        # 각 이평선별 지지 여부 체크
+        lines_to_check = [
+            ("112이평 지지", ema112),
+            ("224이평 지지", ema224),
+            ("448이평 지지", ema448),
+            ("896이평 지지", ema896)
+        ]
 
-        if detected:
-            matched_count += 1
-            caption = (
-                f"⚡ [비트코인(BTC/USDT) 포착]\n"
-                f"• 타임프레임: {tf}\n"
-                f"• 상태: {line_info} (정배열 달성 후)\n"
-                f"• 현재가: ${curr_price:,.2f}\n"
-                f"• 해당 이평선: ${val:,.2f}"
-            )
-            
-            chart_file = None
-            try:
-                chart_file = create_btc_chart(df, tf, line_info)
-                send_telegram_photo(chart_file, caption=caption)
-            except Exception as chart_err:
-                print(f"차트 생성 실패 ({tf}): {chart_err}")
-                send_telegram_msg(caption)
+        for line_name, ema_series in lines_to_check:
+            recent_ema = ema_series.iloc[-5:]
+            # 캔들의 고가~저가가 이평선 근처(±2.5%)에 닿았는지 체크
+            if ((recent_low <= recent_ema * 1.025) & (recent_high >= recent_ema * 0.975)).any():
+                val = float(ema_series.dropna().iloc[-1])
+                caption = (
+                    f"⚡ [비트코인(BTC/USDT) 포착]\n"
+                    f"• 타임프레임: {tf}\n"
+                    f"• 상태: {line_name} (최근 300캔들 내 정배열 달성 후)\n"
+                    f"• 현재가: ${curr_price:,.2f}\n"
+                    f"• 해당 이평선: ${val:,.2f}"
+                )
+                
+                chart_file = None
+                try:
+                    chart_file = create_btc_chart(df, tf, line_name)
+                    send_telegram_photo(chart_file, caption=caption)
+                except Exception as chart_err:
+                    print(f"차트 생성 실패 ({tf}): {chart_err}")
+                    send_telegram_msg(caption)
 
-            if chart_file and os.path.exists(chart_file):
-                os.remove(chart_file)
+                if chart_file and os.path.exists(chart_file):
+                    os.remove(chart_file)
+                
+                # 해당 타임프레임에서 포착되면 1회 발송 후 다음 타임프레임으로
+                break
 
     except Exception as e:
         print(f"비트코인 스캔 에러 ({tf}): {e}")
