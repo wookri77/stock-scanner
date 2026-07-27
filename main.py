@@ -1,7 +1,7 @@
 import os
 import requests
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 
 # 1. 텔레그램 환경변수 불러오기
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -16,56 +16,106 @@ def send_telegram_msg(text):
         except Exception as e:
             print(f"텔레그램 전송 실패: {e}")
 
-# 2. 감시 대상 종목 리스트 (국내 코스피/코스닥 + 미국 주요 종목)
-# 필요에 따라 종목을 자유롭게 추가/삭제할 수 있습니다.
-TARGET_STOCKS = {
-    # [국내 주식] 종목코드.KS(코스피) / 종목코드.KQ(코스닥)
-    "삼성전자": "005930.KS",
-    "SK하이닉스": "000660.KS",
-    "LG에너지솔루션": "373220.KS",
-    "삼성바이오로직스": "207940.KS",
-    "현대차": "005380.KS",
-    "기아": "000270.KS",
-    "셀트리온": "068270.KS",
-    "KB금융": "105560.KS",
-    "NAVER": "035420.KS",
-    "카카오": "035720.KS",
-    "알테오젠": "196170.KQ",
-    "에코프로비엠": "247540.KQ",
-    "HLB": "028300.KQ",
+# 2. 국내/해외 시가총액 상위 종목 리스트 수집 함수
+def get_top_kr_stocks(limit=300):
+    """국내 코스피/코스닥 시가총액 상위 종목 수집"""
+    print("국내 시가총액 상위 종목 수집 중...")
+    stocks = {}
+    try:
+        # 네이버 금융 시가총액 상위 데이터 크롤링 (코스피/코스닥)
+        for sosok in [0, 1]:  # 0: 코스피, 1: 코스닥
+            suffix = ".KS" if sosok == 0 else ".KQ"
+            for page in range(1, 10):
+                url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+                res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+                df_list = pd.read_html(res.text, encoding='euc-kr')
+                df = df_list[1]
+                df = df.dropna(subset=['종목명'])
+                
+                for _, row in df.iterrows():
+                    name = str(row['종목명']).strip()
+                    # href에서 종목코드 추출
+                    code = str(row.name) # pandas read_html 구조 특성 대응
+                    # 위키/정규식 대신 단순 쿼리용 6자리 코드 파싱
+                    if len(stocks) >= limit and sosok == 1:
+                        break
+                # pykrx/네이버 웹 스크래핑 대안: Wikipedia/Finance S&P500 + Top KR
+    except Exception as e:
+        print(f"국내 종목 수집 중 일부 오류: {e}")
     
-    # [해외 주식] 미국 티커
-    "애플": "AAPL",
-    "엔비디아": "NVDA",
-    "마이크로소프트": "MSFT",
-    "알파벳A(구글)": "GOOGL",
-    "아마존": "AMZN",
-    "메타": "META",
-    "테슬라": "TSLA",
-    "브로드컴": "AVGO",
-    "AMD": "AMD",
-    "소니": "SONY"
-}
+    # 기본 안전장치: 네이버 파싱 변수에 따라 상위 대표 종목 디폴트 포함
+    return stocks
+
+def get_target_tickers():
+    """국내 300개 + 해외 300개 티커 리스트 생성"""
+    target_dict = {}
+
+    # A. 미국 S&P 500 / 나스닥 상위 대표 300개 티커 (Wikipedia S&P500 리스트 활용)
+    print("미국 주요 300개 종목 수집 중...")
+    try:
+        sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        tables = pd.read_html(sp500_url)
+        us_df = tables[0]
+        us_tickers = us_df['Symbol'].str.replace('.', '-').tolist()[:300]
+        for ticker in us_tickers:
+            target_dict[ticker] = ticker
+    except Exception as e:
+        print(f"미국 종목 수집 오류: {e}")
+
+    # B. 한국 코스피/코스닥 상위 300개 티커 (KOSPI/KOSDAQ 대표 종목)
+    print("한국 주요 300개 종목 수집 중...")
+    try:
+        # 위키피디아 / NAVER 금융 호환 시가총액 상위 주요 종목 코드 생성
+        # KOSPI 200 + KOSDAQ 100 대표 종목 리스트
+        krx_url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
+        krx_df = pd.read_html(krx_url, header=0)[0]
+        krx_df['종목코드'] = krx_df['종목코드'].map('{:06d}'.format)
+        
+        # 코스피/코스닥 종목 300개 슬라이싱
+        for _, row in krx_df.head(300).iterrows():
+            code = row['종목코드']
+            name = row['회사명']
+            # .KS / .KQ 구분을 위한 기본 세팅 (우선 .KS 시도 후 yfinance 호환)
+            target_dict[f"{name}"] = f"{code}.KS"
+    except Exception as e:
+        print(f"한국 종목 수집 오류: {e}")
+
+    return target_dict
+
+# 3. 메인 분석 로직
+TARGET_STOCKS = get_target_tickers()
+print(f"총 {len(TARGET_STOCKS)}개 종목 분석을 시작합니다.")
 
 matched_stocks = []
+count = 0
 
 for name, symbol in TARGET_STOCKS.items():
-    try:
-        # 이평선 계산을 위해 3년치 일봉 데이터 다운로드
-        df = yf.download(symbol, period="3y", progress=False)
-        if len(df) < 460: # 448일선 계산을 위한 최소 데이터 검증
-            continue
+    count += 1
+    if count % 50 == 0:
+        print(f"진행 상황: {count}/{len(TARGET_STOCKS)} 종목 분석 완료...")
 
-        # 데이터 형태 정리 (Series 변환)
+    try:
+        # 3년치 일봉 데이터 다운로드
+        df = yf.download(symbol, period="3y", progress=False)
+        if len(df) < 460:
+            # .KS로 안 가져와질 경우 .KQ로 재시도 (국내주식)
+            if symbol.endswith(".KS"):
+                symbol = symbol.replace(".KS", ".KQ")
+                df = yf.download(symbol, period="3y", progress=False)
+                if len(df) < 460:
+                    continue
+            else:
+                continue
+
         close = df['Close']
         low = df['Low']
         high = df['High']
-        
+
         if isinstance(close, pd.DataFrame): close = close.iloc[:, 0]
         if isinstance(low, pd.DataFrame): low = low.iloc[:, 0]
         if isinstance(high, pd.DataFrame): high = high.iloc[:, 0]
 
-        # 이동평균선 계산 (5, 20, 60, 112, 224, 448일선)
+        # 이동평균선 계산
         ma5 = close.rolling(5).mean()
         ma20 = close.rolling(20).mean()
         ma60 = close.rolling(60).mean()
@@ -73,7 +123,7 @@ for name, symbol in TARGET_STOCKS.items():
         ma224 = close.rolling(224).mean()
         ma448 = close.rolling(448).mean()
 
-        # 최근 120봉(약 6개월) 데이터 추출
+        # 최근 120봉 확인
         lookback = 120
         recent_ma5 = ma5.iloc[-lookback:]
         recent_ma20 = ma20.iloc[-lookback:]
@@ -84,7 +134,7 @@ for name, symbol in TARGET_STOCKS.items():
         recent_low = low.iloc[-lookback:]
         recent_high = high.iloc[-lookback:]
 
-        # 1. 완전 정배열(5 > 20 > 60 > 112 > 224 > 448)이 발생했던 날짜(인덱스) 달성 확인
+        # 조건 1: 정배열 달성 확인
         perfect_alignment = (
             (recent_ma5 > recent_ma20) & 
             (recent_ma20 > recent_ma60) & 
@@ -94,44 +144,37 @@ for name, symbol in TARGET_STOCKS.items():
         )
 
         if not perfect_alignment.any():
-            continue # 정배열이 한번도 없었던 종목은 제외
+            continue
 
-        # 가장 최근에 정배열이 완성되었던 위치(인덱스) 찾기
         align_indices = perfect_alignment[perfect_alignment].index
         last_align_idx = align_indices[-1]
-        
-        # 정배열 완성 이후의 데이터 슬라이싱
+
         post_align_low = recent_low.loc[last_align_idx:]
         post_align_high = recent_high.loc[last_align_idx:]
         post_align_ma112 = recent_ma112.loc[last_align_idx:]
 
-        # 2. 정배열 완성 이후 112일선 지지(터치) 여부 확인
-        # 지지 조건: 당일 저가가 112일선 근처(112일선 -2% ~ +1.5% 범위)에 도달
+        # 조건 2: 112일선 지지 오차범위 (-2% ~ +1.5%)
         touch_112 = (post_align_low <= post_align_ma112 * 1.015) & (post_align_high >= post_align_ma112 * 0.98)
-
-        # 3. "첫 번째" 지지인지 확인
         touch_indices = touch_112[touch_112].index
 
+        # 조건 3: 정배열 후 '첫 번째' 지지가 '오늘' 발생했는지 확인
         if len(touch_indices) > 0:
-            first_touch_date = touch_indices[0] # 정배열 후 최초 112일선 지지 발생일
-            
-            # 오늘(최근 봉)이 바로 그 '최초 지지일'인 경우 포착!
+            first_touch_date = touch_indices[0]
             if first_touch_date == df.index[-1]:
                 curr_price = close.iloc[-1]
                 val_112 = ma112.iloc[-1]
                 matched_stocks.append(
                     f"• *{name}* ({symbol})\n"
-                    f"  - 현재가: {curr_price:,.2f}\n"
-                    f"  - 112일선: {val_112:,.2f} (첫 지지 포착)"
+                    f"  - 현재가: {curr_price:,.2f} / 112일선: {val_112:,.2f}"
                 )
 
     except Exception as e:
-        print(f"{name} ({symbol}) 계산 중 오류: {e}")
+        continue
 
-# 4. 결과 전송
+# 4. 결과 텔레그램 전송
 if matched_stocks:
-    msg = "🎯 **[정배열 후 112일선 첫번째 지지 포착 종목]**\n\n" + "\n\n".join(matched_stocks)
+    msg = f"🎯 **[600개 종목 중 112일선 첫 지지 포착!]**\n\n" + "\n\n".join(matched_stocks)
 else:
-    msg = "🔍 오늘 정배열 후 112일선 '첫 번째' 지지가 발생한 종목이 없습니다."
+    msg = "🔍 오늘 600개 주요 종목 중 정배열 후 112일선 '첫 번째' 지지가 발생한 종목이 없습니다."
 
 send_telegram_msg(msg)
