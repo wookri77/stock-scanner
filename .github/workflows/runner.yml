@@ -1,10 +1,9 @@
-name: Stock & BTC Scanner
+name: Crypto Scanner
 
 on:
   schedule:
-    # 5분마다 자동 실행
-    - cron: '*/5 * * * *'
-  workflow_dispatch: # 수동 실행 버튼
+    - cron: '* * * * *'  # 1분마다 실행 요청
+  workflow_dispatch:     # 수동 실행 허용
 
 jobs:
   build:
@@ -17,11 +16,10 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: |
-          pip install requests pandas yfinance ccxt mplfinance matplotlib
-      - name: Run All Scanners
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run Crypto Scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python main.py
-          python crypto_main.py
+        run: python crypto_main.py
