@@ -5,7 +5,7 @@ import yfinance as yf
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 
-# 1. 텔레그램 환경변수 설정
+# 1. 텔레그램 설정
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -14,7 +14,7 @@ def send_telegram_msg(text):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
         try:
-            requests.post(url, json=payload)
+            requests.post(url, json=payload, timeout=10)
         except Exception as e:
             print(f"텔레그램 텍스트 전송 실패: {e}")
 
@@ -25,13 +25,13 @@ def send_telegram_photo(photo_path, caption=""):
             with open(photo_path, 'rb') as photo:
                 payload = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
                 files = {"photo": photo}
-                res = requests.post(url, data=payload, files=files)
+                res = requests.post(url, data=payload, files=files, timeout=15)
                 if not res.ok:
                     print(f"사진 전송 응답 오류 ({photo_path}): {res.text}")
         except Exception as e:
             print(f"텔레그램 사진 전송 예외: {e}")
 
-# 2. 차트 생성 함수 (종목명 포함)
+# 2. 차트 생성 함수
 def create_stock_chart(clean_df, name, symbol, line_type):
     chart_df = clean_df.iloc[-120:].copy()
     
@@ -64,96 +64,75 @@ def create_stock_chart(clean_df, name, symbol, line_type):
     plt.close('all')
     return file_name
 
-# 3. 미국(300개) + 한국(300개) 종목명 및 티커 수집
-def get_stock_dictionary():
-    stock_dict = {}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+# 3. 주요 종목 딕셔너리 (차단 없는 안정적 명단)
+def get_target_stocks():
+    return {
+        # === 한국 대표 주요 종목 ===
+        "삼성전자": "005930.KS", "SK하이닉스": "000660.KS", "LG에너지솔루션": "373220.KS",
+        "삼성바이오로직스": "207940.KS", "현대차": "005380.KS", "기아": "000270.KS",
+        "셀트리온": "068270.KS", "KB금융": "105560.KS", "NAVER": "035420.KS",
+        "HD현대중공업": "329180.KS", "POSCO홀딩스": "005490.KS", "신한지주": "055550.KS",
+        "삼성물산": "028260.KS", "현대모비스": "012330.KS", "카카오": "035720.KS",
+        "LG화학": "051910.KS", "삼성SDI": "006400.KS", "하나금융지주": "086790.KS",
+        "메리츠금융지주": "138040.KS", "삼성생명": "032830.KS", "에코프로비엠": "247540.KQ",
+        "에코프로": "086520.KQ", "HLB": "028300.KQ", "알테오젠": "196170.KQ",
+        "카카오뱅크": "377300.KS", "크래프톤": "259960.KS", "한화에어로스페이스": "012450.KS",
+        "한국전력": "015760.KS", "HMM": "011200.KS", "LG전자": "066570.KS",
+        "S-Oil": "010950.KS", "우리금융지주": "316140.KS", "KT&G": "033780.KS",
+        "삼성화재": "000810.KS", "HD한국조선해양": "009540.KS", "SK이노베이션": "096770.KS",
+        "한화오션": "042660.KS", "두산에너빌리티": "034020.KS", "기업은행": "024110.KS",
+        
+        # === 미국 대표 주요 종목 ===
+        "애플": "AAPL", "엔비디아": "NVDA", "마이크로소프트": "MSFT", "아마존": "AMZN",
+        "구글(알파벳A)": "GOOGL", "메타": "META", "테슬라": "TSLA", "버크셔해서웨이": "BRK-B",
+        "일라이릴리": "LLY", "브로드컴": "AVGO", "JP모건": "JPM", "비자": "V",
+        "월마트": "WMT", "마스터카드": "MA", "엑손모빌": "XOM", "존슨앤드존슨": "JNJ",
+        "프록터앤드갬블": "PG", "코스트코": "COST", "Home Depot": "HD", "AMD": "AMD",
+        "넷플릭스": "NFLX", "쉐브론": "CVX", "머크": "MRK", "아베비": "ABBV",
+        "피프티세븐": "PLTR", "코카콜라": "KO", "펩시코": "PEP", "뱅크오브아메리카": "BAC",
+        "퀄컴": "QCOM", "암젠": "AMGN", "디즈니": "DIS", "인텔": "INTC",
+        "나이키": "NKE", "코인베이스": "COIN", "아이온큐": "IONQ", "SOXL": "SOXL"
+    }
 
-    # [미국] S&P 500 종목명 & 티커 300개 수집
-    try:
-        sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        req = requests.get(sp500_url, headers=headers)
-        tables = pd.read_html(req.text)
-        df_us = tables[0][['Symbol', 'Security']].iloc[:300]
-        for _, row in df_us.iterrows():
-            sym = str(row['Symbol']).replace('.', '-')
-            name = str(row['Security'])
-            stock_dict[name] = sym
-        print(f"미국 주식 {len(stock_dict)}개 종목 수집 완료")
-    except Exception as e:
-        print(f"미국 종목 크롤링 예외: {e}")
-
-    # [한국] 네이버 금융 시가총액 상위 종목 수집 (KOSPI & KOSDAQ 상위 300개)
-    kr_count = 0
-    for page in range(1, 7): # 페이지당 50개씩 총 300개
-        for sosok in [0, 1]: # 0: 코스피, 1: 코스닥
-            try:
-                url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
-                res = requests.get(url, headers=headers)
-                df_list = pd.read_html(res.text, encoding='euc-kr')
-                df_kr = df_list[1].dropna(how='all')
-                
-                # HTML에서 종목 코드 및 종목명 추출
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(res.text, 'html.parser')
-                links = soup.select("table.type_2 a.tlto")
-                
-                for link in links:
-                    code = link['href'].split('code=')[-1]
-                    name = link.text.strip()
-                    suffix = ".KS" if sosok == 0 else ".KQ"
-                    symbol = f"{code}{suffix}"
-                    if name not in stock_dict:
-                        stock_dict[name] = symbol
-                        kr_count += 1
-            except Exception as e:
-                continue
-
-    print(f"한국 주식 {kr_count}개 종목 수집 완료 (전체 스캔 대상: {len(stock_dict)}개)")
-    return stock_dict
-
-# 4. 분석 실행
+# 4. 메인 실행 로직
 send_telegram_msg("🚀 [주식 이평선 스캐너] 스캔을 시작합니다.")
 
-TARGET_STOCKS = get_stock_dictionary()
+TARGET_STOCKS = get_target_stocks()
 matched_summary = []
 matched_charts = []
 
 for name, symbol in TARGET_STOCKS.items():
     try:
+        # 데이터 수집
         df = yf.download(symbol, period="3y", progress=False)
         if df.empty or len(df) < 450:
             continue
 
+        # yfinance MultiIndex 데이터프레임 구조 강제 단일화
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        def clean_series(data):
-            if isinstance(data, pd.DataFrame):
-                data = data.iloc[:, 0]
-            return data
-
-        open_s = clean_series(df['Open'])
-        high_s = clean_series(df['High'])
-        low_s = clean_series(df['Low'])
-        close_s = clean_series(df['Close'])
-        volume_s = clean_series(df['Volume'])
-
+        # 데이터 가공
         clean_df = pd.DataFrame({
-            'Open': open_s, 'High': high_s, 'Low': low_s, 'Close': close_s, 'Volume': volume_s
-        }, index=df.index).dropna()
+            'Open': df['Open'],
+            'High': df['High'],
+            'Low': df['Low'],
+            'Close': df['Close'],
+            'Volume': df['Volume']
+        }).dropna()
 
         if len(clean_df) < 450:
             continue
 
-        close_s = clean_df['Close']
-        low_s = clean_df['Low']
-        high_s = clean_df['High']
+        close_s = clean_df['Close'].astype(float)
+        low_s = clean_df['Low'].astype(float)
+        high_s = clean_df['High'].astype(float)
 
         ma112 = close_s.rolling(112).mean()
         ma224 = close_s.rolling(224).mean()
         ma448 = close_s.rolling(448).mean()
 
+        # 정배열 조건 검증 (최근 120일 중 112 > 224 > 448 정배열 순간 존재)
         recent_112 = ma112.iloc[-120:]
         recent_224 = ma224.iloc[-120:]
         recent_448 = ma448.iloc[-120:]
@@ -162,13 +141,14 @@ for name, symbol in TARGET_STOCKS.items():
         if not alignment_6m.any():
             continue
 
+        # 최근 3봉 기준 이평선 지지 여부
         recent_low = low_s.iloc[-3:]
         recent_high = high_s.iloc[-3:]
         recent_ma112 = ma112.iloc[-3:]
         recent_ma224 = ma224.iloc[-3:]
         recent_ma448 = ma448.iloc[-3:]
 
-        curr_price = float(close_s.dropna().iloc[-1])
+        curr_price = float(close_s.iloc[-1])
         
         detected = False
         line_info = ""
@@ -208,9 +188,10 @@ for name, symbol in TARGET_STOCKS.items():
                 print(f"차트 생성 실패 ({symbol}): {chart_err}")
 
     except Exception as e:
+        print(f"종목 오류 ({symbol}): {e}")
         continue
 
-# 5. 최종 알림 발송
+# 5. 최종 결과 발송
 if matched_summary:
     divider = "\n" + "-" * 28 + "\n\n"
     summary_text = (
