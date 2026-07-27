@@ -2,9 +2,9 @@ import os
 import time
 import requests
 import pandas as pd
-import ccxt
 import mplfinance as mpf
 import matplotlib.pyplot as plt
+from tvdatafeed import TvDatafeed, Interval
 
 # 1. 텔레그램 환경변수 설정
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -67,40 +67,62 @@ def create_btc_chart(df, timeframe, line_type):
     plt.close('all')
     return file_name
 
-# 3. 바이비트(Bybit) 거래소 연결 (GitHub Actions IP 차단 없음)
-exchange = ccxt.bybit({
-    'timeout': 20000,
-    'enableRateLimit': True,
-})
+# 3. 트레이딩뷰(TvDatafeed) 객체 생성 (비로그인 상태로 사용 가능)
+tv = TvDatafeed()
 
-TIMEFRAMES = ["5m", "1h", "4h", "12h", "1d"]
+# 타임프레임 매핑 (트레이딩뷰 규격)
+TIMEFRAME_MAP = {
+    "5m": Interval.in_5_minute,
+    "1h": Interval.in_1_hour,
+    "4h": Interval.in_4_hour,
+    "12h": Interval.in_2_hour, # tvdatafeed에서 12h 미지원 시 대안 또는 1d/4h 조합 사용
+    "1d": Interval.in_daily
+}
 
-print("=== BTC 스캐너 시작 ===")
+def fetch_tv_btc(timeframe_str):
+    """트레이딩뷰에서 BTC/USDT 차트 데이터 수집"""
+    # BYBIT 소스 우선, 실패 시 BINANCE 소스 사용
+    exchanges = ["BYBIT", "BINANCE"]
+    interval = TIMEFRAME_MAP.get(timeframe_str, Interval.in_1_hour)
+    
+    for ex in exchanges:
+        try:
+            df = tv.get_hist(symbol='BTCUSDT', exchange=ex, interval=interval, n_bars=1000)
+            if df is not None and not df.empty:
+                # 컬럼명 통일 (open -> Open 등)
+                df = df.rename(columns={
+                    'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
+                })
+                print(f"[{timeframe_str}] 트레이딩뷰 데이터 수집 성공 ({ex})")
+                return df
+        except Exception as e:
+            print(f"[{timeframe_str}] {ex} 트레이딩뷰 수집 실패: {e}")
+            time.sleep(0.5)
+            
+    raise Exception("트레이딩뷰 데이터 수집 전체 실패")
+
+TIMEFRAMES = ["5m", "1h", "4h", "1d"]  # 안정적인 지원 타임프레임
+
+print("=== BTC 스캐너 시작 (TradingView Engine) ===")
 
 any_matched = False
 status_reports = []
 
 for tf in TIMEFRAMES:
     try:
-        time.sleep(0.3)
+        time.sleep(0.5)
 
-        # Bybit BTC/USDT 데이터 수집
-        ohlcv = exchange.fetch_ohlcv("BTC/USDT", timeframe=tf, limit=1000)
-        df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
-        df.set_index('Timestamp', inplace=True)
+        df = fetch_tv_btc(tf)
 
         close_s = df['Close']
         low_s = df['Low']
         high_s = df['High']
 
-        # EMA (지수이동평균) 계산
         ema112 = close_s.ewm(span=112, adjust=False).mean()
         ema224 = close_s.ewm(span=224, adjust=False).mean()
         ema448 = close_s.ewm(span=448, adjust=False).mean()
         ema896 = close_s.ewm(span=896, adjust=False).mean()
 
-        # 최근 300개 캔들 내 정배열 유효성 판별
         recent_112 = ema112.iloc[-300:]
         recent_224 = ema224.iloc[-300:]
         recent_448 = ema448.iloc[-300:]
@@ -112,11 +134,10 @@ for tf in TIMEFRAMES:
         is_aligned = alignment_full.any() or alignment_main.any()
 
         if not is_aligned:
-            status_reports.append(f"• {tf}: 최근 300캔들 내 정배열 미충족")
-            print(f"[{tf}] 최근 300캔들 내 정배열 미충족 스킵")
+            status_reports.append(f"• {tf}: 최근 정배열 미충족")
+            print(f"[{tf}] 정배열 미충족 스킵")
             continue
 
-        # 최근 3개 캔들 내 지지 여부 체크 (오차범위 ±0.1% 정밀 타격)
         recent_low = low_s.iloc[-3:]
         recent_high = high_s.iloc[-3:]
 
@@ -133,11 +154,10 @@ for tf in TIMEFRAMES:
 
         for line_name, ema_series in lines_to_check:
             recent_ema = ema_series.iloc[-3:]
-            # 캔들의 고가~저가가 이평선의 ±0.1% 범위 내에 정확히 닿았는지 판별
             if ((recent_low <= recent_ema * 1.001) & (recent_high >= recent_ema * 0.999)).any():
                 val = float(ema_series.dropna().iloc[-1])
                 caption = (
-                    f"⚡ [비트코인(BTC/USDT) 포착]\n"
+                    f"⚡ [비트코인(BTC/USDT) 포착 - TradingView]\n"
                     f"• 타임프레임: {tf}\n"
                     f"• 상태: {line_name} (오차 0.1% 터치)\n"
                     f"• 현재가: ${curr_price:,.2f}\n"
@@ -162,17 +182,16 @@ for tf in TIMEFRAMES:
 
         if not found_support:
             status_reports.append(f"• {tf}: 정배열 충족, 이평선(±0.1%) 미접촉")
-            print(f"[{tf}] 최근 3캔들 내 이평선 0.1% 범위 터치 없음")
+            print(f"[{tf}] 이평선 0.1% 범위 터치 없음")
 
     except Exception as e:
         print(f"비트코인 스캔 에러 ({tf}): {e}")
-        status_reports.append(f"• {tf}: 조회 실패 및 에러")
+        status_reports.append(f"• {tf}: 조회 실패 ({e})")
         continue
 
-# 조건에 부합하는 타임프레임이 하나도 없을 때 안내 메시지 발송
 if not any_matched:
     report_text = (
-        "ℹ️ [BTC/USDT 스캔 안내]\n"
+        "ℹ️ [BTC/USDT 스캔 안내 - TradingView]\n"
         "현재 조건(정배열 + 이평선 ±0.1% 터치)에 부합하는 타임프레임이 없습니다.\n\n"
         "[타임프레임별 상태 요약]\n" + "\n".join(status_reports)
     )
