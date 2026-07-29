@@ -2,207 +2,221 @@ import os
 import requests
 import pandas as pd
 import yfinance as yf
-import mplfinance as mpf
 import matplotlib.pyplot as plt
+import mplfinance as mpf
 
-# 1. 텔레그램 설정
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 def send_telegram_msg(text):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-        try:
-            requests.post(url, json=payload, timeout=10)
-        except Exception as e:
-            print(f"텔레그램 텍스트 전송 실패: {e}")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"})
 
 def send_telegram_photo(photo_path, caption=""):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID and os.path.exists(photo_path):
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        try:
-            with open(photo_path, 'rb') as photo:
-                payload = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
-                files = {"photo": photo}
-                res = requests.post(url, data=payload, files=files, timeout=15)
-                if not res.ok:
-                    print(f"사진 전송 응답 오류 ({photo_path}): {res.text}")
-        except Exception as e:
-            print(f"텔레그램 사진 전송 예외: {e}")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    with open(photo_path, 'rb') as photo:
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, files={"photo": photo})
 
-# 2. 차트 생성 함수
-def create_stock_chart(clean_df, name, symbol, line_type):
-    chart_df = clean_df.iloc[-120:].copy()
+# ==========================================
+# 스캔 대상 종목 리스트 (ETF/레버리지 제외, 일반 개별주식만 구성)
+# ==========================================
+STOCK_MARKETS = {
+    # --- [국내주식: 코스피/코스닥 주요 개별주] ---
+    "005930.KS": "삼성전자",
+    "000660.KS": "SK하이닉스",
+    "035420.KS": "NAVER",
+    "035720.KS": "카카오",
+    "005380.KS": "현대차",
+    "000270.KS": "기아",
+    "068270.KS": "셀트리온",
+    "207940.KS": "삼성바이오로직스",
+    "005935.KS": "삼성전자우",
+    "006400.KS": "삼성SDI",
+    "051910.KS": "LG화학",
+    "373220.KS": "LG에너지솔루션",
+    "003550.KS": "LG",
+    "015760.KS": "한국전력",
+    "032830.KS": "삼성생명",
+    "012330.KS": "현대모비스",
+    "055550.KS": "신한지주",
+    "105560.KS": "KB금융",
+    "086790.KS": "하나금융지주",
+    "010140.KS": "삼성중공업",
+    "009540.KS": "HD한국조선해양",
+    "011200.KS": "HMM",
+    "034020.KS": "두산에너빌리티",
+    "010950.KS": "S-Oil",
+    "036570.KS": "엔씨소프트",
+    "251270.KS": "넷마블",
+    "259960.KS": "크래프톤",
+    "247540.KQ": "에코프로비엠",
+    "086520.KQ": "에코프로",
+    "091990.KQ": "셀트리온제약",
+    "293490.KQ": "카카오게임즈",
+    "112040.KQ": "위메이드",
+    "035900.KQ": "JYP Ent.",
+    "122870.KQ": "와이지엔터테인먼트",
+    "352820.KS": "하이브",
+
+    # --- [미국주식: Big Tech / AI / 반도체 개별주] ---
+    "NVDA": "엔비디아 (NVIDIA)",
+    "AAPL": "애플 (Apple)",
+    "MSFT": "마이크로소프트 (Microsoft)",
+    "AMZN": "아마존 (Amazon)",
+    "GOOGL": "구글 (Alphabet)",
+    "TSLA": "테슬라 (Tesla)",
+    "META": "메타 (Meta)",
+    "AMD": "AMD",
+    "AVGO": "브로드컴 (Broadcom)",
+    "QCOM": "퀄컴 (Qualcomm)",
+    "INTC": "인텔 (Intel)",
+    "PLTR": "팔란티어 (Palantir)",
+    "ARM": "ARM 홀딩스",
+    "SMCI": "슈퍼마이크로컴퓨터",
+    "ASML": "ASML",
+    "TSM": "TSMC",
+    "MU": "마이크론 (Micron)",
+    "AMAT": "어플라이드 머티리얼즈",
+    "LRCX": "렘리서치",
+    "ORCL": "오라클 (Oracle)",
+    "IBM": "IBM",
+    "ADBE": "어도비 (Adobe)",
+    "CRM": "세일즈포스 (Salesforce)",
+    "NOW": "서비스나우 (ServiceNow)",
+    "CSCO": "시스코 (Cisco)",
+
+    # --- [미국주식: 성장주 / 플랫폼 / 전기차 개별주] ---
+    "RBLX": "로블록스 (Roblox)",
+    "SNOW": "스노우플레이크 (Snowflake)",
+    "U": "유니티 (Unity)",
+    "SHOP": "쇼피파이 (Shopify)",
+    "SQ": "블록 (Block/Square)",
+    "PYPL": "페이팔 (PayPal)",
+    "COIN": "코인베이스 (Coinbase)",
+    "HOOD": "로빈후드 (Robinhood)",
+    "MSTR": "마이크로스트래티지",
+    "RIVN": "리비안 (Rivian)",
+    "LCID": "루시드 (Lucid)",
+    "NIO": "니오 (NIO)",
+    "XPEV": "샤오펑 (XPeng)",
+
+    # --- [미국주식: 소비재 / 엔터 / 산업 / 방산 개별주] ---
+    "NFLX": "넷플릭스 (Netflix)",
+    "DIS": "디즈니 (Disney)",
+    "SBUX": "스타벅스 (Starbucks)",
+    "NKE": "나이키 (Nike)",
+    "COST": "코스트코 (Costco)",
+    "WMT": "월마트 (Walmart)",
+    "TGT": "타겟 (Target)",
+    "MCD": "맥도날드 (McDonald's)",
+    "KO": "코카콜라 (Coca-Cola)",
+    "PEP": "펩시코 (PepsiCo)",
+    "ABNB": "에어비앤비 (Airbnb)",
+    "BKNG": "부킹홀딩스",
+    "LMT": "록히드마틴 (Lockheed Martin)",
+    "RTX": "RTX (레이시온)",
+    "BA": "보잉 (Boeing)",
+    "CAT": "캐터필러 (Caterpillar)",
+    "GE": "GE 에어로스페이스",
+    "XOM": "엑슨모빌 (Exxon Mobil)",
+    "CVX": "쉐브론 (Chevron)",
+
+    # --- [미국주식: 금융 / 헬스케어 / 제약 개별주] ---
+    "JPM": "JP모건 체이스",
+    "BAC": "뱅크오브아메리카",
+    "MS": "모건스탠리",
+    "GS": "골드만삭스",
+    "V": "비자 (Visa)",
+    "MA": "마스터카드 (Mastercard)",
+    "LLY": "일라이릴리 (Eli Lilly)",
+    "NVO": "노보노디스크 (Novo Nordisk)",
+    "PFE": "화이자 (Pfizer)",
+    "JNJ": "존슨앤드존슨",
+    "UNH": "유나이티드헬스",
+    "MRNA": "모더나 (Moderna)"
+}
+
+def main():
+    matched = []
     
-    close_s = chart_df['Close']
-    ma112 = close_s.rolling(112).mean()
-    ma224 = close_s.rolling(224).mean()
-    ma448 = close_s.rolling(448).mean()
-
-    add_plots = [
-        mpf.make_addplot(ma112, color='orange', width=1.5),
-        mpf.make_addplot(ma224, color='red', width=1.5),
-        mpf.make_addplot(ma448, color='purple', width=1.5)
-    ]
-
-    mc = mpf.make_marketcolors(up='red', down='blue', edge='inherit', wick='inherit')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=True)
-
-    file_name = f"{symbol.replace('.', '_')}_chart.png"
-    mpf.plot(
-        chart_df,
-        type='candle',
-        style=s,
-        addplot=add_plots,
-        title=f"\n{name} ({symbol}) - {line_type}",
-        savefig=file_name,
-        volume=False,
-        figratio=(12, 7),
-        figscale=1.1
-    )
-    plt.close('all')
-    return file_name
-
-# 3. 주요 종목 딕셔너리 (차단 없는 안정적 명단)
-def get_target_stocks():
-    return {
-        # === 한국 대표 주요 종목 ===
-        "삼성전자": "005930.KS", "SK하이닉스": "000660.KS", "LG에너지솔루션": "373220.KS",
-        "삼성바이오로직스": "207940.KS", "현대차": "005380.KS", "기아": "000270.KS",
-        "셀트리온": "068270.KS", "KB금융": "105560.KS", "NAVER": "035420.KS",
-        "HD현대중공업": "329180.KS", "POSCO홀딩스": "005490.KS", "신한지주": "055550.KS",
-        "삼성물산": "028260.KS", "현대모비스": "012330.KS", "카카오": "035720.KS",
-        "LG화학": "051910.KS", "삼성SDI": "006400.KS", "하나금융지주": "086790.KS",
-        "메리츠금융지주": "138040.KS", "삼성생명": "032830.KS", "에코프로비엠": "247540.KQ",
-        "에코프로": "086520.KQ", "HLB": "028300.KQ", "알테오젠": "196170.KQ",
-        "카카오뱅크": "377300.KS", "크래프톤": "259960.KS", "한화에어로스페이스": "012450.KS",
-        "한국전력": "015760.KS", "HMM": "011200.KS", "LG전자": "066570.KS",
-        "S-Oil": "010950.KS", "우리금융지주": "316140.KS", "KT&G": "033780.KS",
-        "삼성화재": "000810.KS", "HD한국조선해양": "009540.KS", "SK이노베이션": "096770.KS",
-        "한화오션": "042660.KS", "두산에너빌리티": "034020.KS", "기업은행": "024110.KS",
-        
-        # === 미국 대표 주요 종목 ===
-        "애플": "AAPL", "엔비디아": "NVDA", "마이크로소프트": "MSFT", "아마존": "AMZN",
-        "구글(알파벳A)": "GOOGL", "메타": "META", "테슬라": "TSLA", "버크셔해서웨이": "BRK-B",
-        "일라이릴리": "LLY", "브로드컴": "AVGO", "JP모건": "JPM", "비자": "V",
-        "월마트": "WMT", "마스터카드": "MA", "엑손모빌": "XOM", "존슨앤드존슨": "JNJ",
-        "프록터앤드갬블": "PG", "코스트코": "COST", "Home Depot": "HD", "AMD": "AMD",
-        "넷플릭스": "NFLX", "쉐브론": "CVX", "머크": "MRK", "아베비": "ABBV",
-        "피프티세븐": "PLTR", "코카콜라": "KO", "펩시코": "PEP", "뱅크오브아메리카": "BAC",
-        "퀄컴": "QCOM", "암젠": "AMGN", "디즈니": "DIS", "인텔": "INTC",
-        "나이키": "NKE", "코인베이스": "COIN", "아이온큐": "IONQ", "SOXL": "SOXL"
-    }
-
-# 4. 메인 실행 로직
-send_telegram_msg("🚀 [주식 이평선 스캐너] 스캔을 시작합니다.")
-
-TARGET_STOCKS = get_target_stocks()
-matched_summary = []
-matched_charts = []
-
-for name, symbol in TARGET_STOCKS.items():
-    try:
-        # 데이터 수집
-        df = yf.download(symbol, period="3y", progress=False)
-        if df.empty or len(df) < 450:
-            continue
-
-        # yfinance MultiIndex 데이터프레임 구조 강제 단일화
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        # 데이터 가공
-        clean_df = pd.DataFrame({
-            'Open': df['Open'],
-            'High': df['High'],
-            'Low': df['Low'],
-            'Close': df['Close'],
-            'Volume': df['Volume']
-        }).dropna()
-
-        if len(clean_df) < 450:
-            continue
-
-        close_s = clean_df['Close'].astype(float)
-        low_s = clean_df['Low'].astype(float)
-        high_s = clean_df['High'].astype(float)
-
-        ma112 = close_s.rolling(112).mean()
-        ma224 = close_s.rolling(224).mean()
-        ma448 = close_s.rolling(448).mean()
-
-        # 정배열 조건 검증 (최근 120일 중 112 > 224 > 448 정배열 순간 존재)
-        recent_112 = ma112.iloc[-120:]
-        recent_224 = ma224.iloc[-120:]
-        recent_448 = ma448.iloc[-120:]
-
-        alignment_6m = (recent_112 > recent_224) & (recent_224 > recent_448)
-        if not alignment_6m.any():
-            continue
-
-        # 최근 3봉 기준 이평선 지지 여부
-        recent_low = low_s.iloc[-3:]
-        recent_high = high_s.iloc[-3:]
-        recent_ma112 = ma112.iloc[-3:]
-        recent_ma224 = ma224.iloc[-3:]
-        recent_ma448 = ma448.iloc[-3:]
-
-        curr_price = float(close_s.iloc[-1])
-        
-        detected = False
-        line_info = ""
-        val = 0.0
-
-        if ((recent_low <= recent_ma112 * 1.02) & (recent_high >= recent_ma112 * 0.97)).any():
-            detected = True
-            line_info = "112일선 지지"
-            val = float(ma112.dropna().iloc[-1])
-        elif ((recent_low <= recent_ma224 * 1.02) & (recent_high >= recent_ma224 * 0.97)).any():
-            detected = True
-            line_info = "224일선 지지"
-            val = float(ma224.dropna().iloc[-1])
-        elif ((recent_low <= recent_ma448 * 1.02) & (recent_high >= recent_ma448 * 0.97)).any():
-            detected = True
-            line_info = "448일선 지지"
-            val = float(ma448.dropna().iloc[-1])
-
-        if detected:
-            unit = "원" if ".KS" in symbol or ".KQ" in symbol else "$"
-            fmt_price = f"{curr_price:,.0f}" if unit == "원" else f"{curr_price:,.2f}"
-            fmt_val = f"{val:,.0f}" if unit == "원" else f"{val:,.2f}"
-
-            item_text = (
-                f"📌 {name} ({symbol})\n"
-                f"• 현재가: {fmt_price}{unit}\n"
-                f"• 상태: {line_info} (이평선: {fmt_val}{unit})"
-            )
-            matched_summary.append(item_text)
-
-            caption = f"🎯 [{name}] ({symbol})\n• 상태: {line_info}\n• 현재가: {fmt_price}{unit} / 이평선: {fmt_val}{unit}"
+    for ticker, name in STOCK_MARKETS.items():
+        try:
+            # yfinance 데이터 수집
+            df = yf.download(ticker, period="2y", progress=False)
+            if df is None or df.empty or len(df) < 448:
+                continue
             
-            try:
-                chart_file = create_stock_chart(clean_df, name, symbol, line_info)
-                matched_charts.append((chart_file, caption))
-            except Exception as chart_err:
-                print(f"차트 생성 실패 ({symbol}): {chart_err}")
+            # MultiIndex 컬럼 단일화
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-    except Exception as e:
-        print(f"종목 오류 ({symbol}): {e}")
-        continue
+            df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
+            
+            close_s = df['Close'].astype(float)
+            high_s = df['High'].astype(float)
+            low_s = df['Low'].astype(float)
 
-# 5. 최종 결과 발송
-if matched_summary:
-    divider = "\n" + "-" * 28 + "\n\n"
-    summary_text = (
-        f"🎯 [주식 장기 이평선 지지 종목 포착 ({len(matched_summary)}건)]\n\n"
-        + divider.join(matched_summary)
-    )
-    send_telegram_msg(summary_text)
+            ma112 = close_s.rolling(112).mean()
+            ma224 = close_s.rolling(224).mean()
+            ma448 = close_s.rolling(448).mean()
 
-    for chart_file, caption in matched_charts:
-        send_telegram_photo(chart_file, caption=caption)
-        if chart_file and os.path.exists(chart_file):
-            os.remove(chart_file)
-else:
-    send_telegram_msg("🔍 오늘 주요 종목 중 장기 이평선(112/224/448일선) 지지가 발생한 종목이 없습니다.")
+            # 정배열 조건 (112 > 224 > 448)
+            check_range = min(200, len(df))
+            alignment = (ma112.iloc[-check_range:] > ma224.iloc[-check_range:]) & \
+                        (ma224.iloc[-check_range:] > ma448.iloc[-check_range:])
+
+            if not alignment.any(): 
+                continue
+
+            # 지지선 접촉 조건 (±0.1% 오차범위)
+            recent_low = low_s.iloc[-3:]
+            recent_high = high_s.iloc[-3:]
+            curr_price = float(close_s.iloc[-1])
+
+            # 통화 구분
+            is_us_stock = not (ticker.endswith(".KS") or ticker.endswith(".KQ"))
+            unit_str = "$" if is_us_stock else "원"
+            price_fmt = f"{curr_price:,.2f}" if is_us_stock else f"{curr_price:,.0f}"
+
+            lines = [("112일선 지지", ma112), ("224일선 지지", ma224), ("448일선 지지", ma448)]
+            for line_name, ma_series in lines:
+                recent_ma = ma_series.iloc[-3:]
+                touch_condition = (recent_low <= recent_ma * 1.001) & (recent_high >= recent_ma * 0.999)
+                
+                if touch_condition.any():
+                    val = float(ma_series.iloc[-1])
+                    val_fmt = f"{val:,.2f}" if is_us_stock else f"{val:,.0f}"
+                    
+                    msg = f"⚡ *[{name}({ticker})]* {line_name}\n• 현재가: `{price_fmt}{unit_str}` | 이평선: `{val_fmt}{unit_str}`"
+                    matched.append(msg)
+
+                    # 차트 생성 및 전송
+                    chart_df = df.tail(150).copy()
+                    chart_df['MA112'] = ma112.tail(150)
+                    chart_df['MA224'] = ma224.tail(150)
+                    chart_df['MA448'] = ma448.tail(150)
+
+                    add_plots = [
+                        mpf.makeaddplot(chart_df['MA112'], color='blue', width=1.5),
+                        mpf.makeaddplot(chart_df['MA224'], color='orange', width=1.5),
+                        mpf.makeaddplot(chart_df['MA448'], color='red', width=1.5)
+                    ]
+                    
+                    filename = f"stock_{ticker.replace('.', '_')}.png"
+                    mpf.plot(chart_df, type='candle', style='charles', addplot=add_plots, 
+                             savefig=filename, volume=False, title=f"\n{name} ({ticker})")
+                    
+                    send_telegram_photo(filename, caption=msg)
+                    if os.path.exists(filename): 
+                        os.remove(filename)
+                    break
+        except Exception as e:
+            continue
+
+    if not matched:
+        send_telegram_msg("📈 *[주식 이평선 스캐너]*\n현재 정배열 및 112/224/448일선 지지(±0.1%) 조건에 부합하는 종목이 0건입니다.")
+
+if __name__ == "__main__":
+    main()
