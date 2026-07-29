@@ -1,30 +1,25 @@
-name: Stock Scanner
+name: Crypto Scanner
 
 on:
   schedule:
-    # 한국시간(KST) 매주 월~금요일 오후 6시(18:00) 실행 
-    # (UTC 기준 오전 09:00 -> 0 9 * * 1-5)
-    - cron: '0 9 * * 1-5'
-  workflow_dispatch: # 필요할 때 언제든 버튼을 눌러 수동 실행 가능
+    - cron: '* * * * *'  # 1분마다 실행 요청
+  workflow_dispatch:     # 수동 실행 허용
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas yfinance mplfinance matplotlib requests beautifulsoup4 lxml
-          
-      - name: Run Stock Scanner
+          pip install -r requirements.txt
+      - name: Run Crypto Scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py
+        run: python crypto_main.py
