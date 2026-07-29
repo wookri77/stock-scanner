@@ -20,7 +20,7 @@ def send_telegram_photo(photo_path, caption=""):
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, files={"photo": photo})
 
 # ==========================================
-# 스캔 대상 종목 리스트 (ETF/레버리지 제외, 일반 개별주식만 구성)
+# 스캔 대상 종목 리스트 (전체 일반 개별주 목록)
 # ==========================================
 STOCK_MARKETS = {
     # --- [국내주식: 코스피/코스닥 주요 개별주] ---
@@ -139,16 +139,15 @@ STOCK_MARKETS = {
 }
 
 def main():
-    matched = []
+    send_telegram_msg("🚀 *[주식 이평선 스캐너]* 스캔을 시작합니다.")
+    matched_count = 0
     
     for ticker, name in STOCK_MARKETS.items():
         try:
-            # yfinance 데이터 수집
             df = yf.download(ticker, period="2y", progress=False)
             if df is None or df.empty or len(df) < 448:
                 continue
             
-            # MultiIndex 컬럼 단일화
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
@@ -162,7 +161,7 @@ def main():
             ma224 = close_s.rolling(224).mean()
             ma448 = close_s.rolling(448).mean()
 
-            # 정배열 조건 (112 > 224 > 448)
+            # 1) 정배열 조건 (112 > 224 > 448)
             check_range = min(200, len(df))
             alignment = (ma112.iloc[-check_range:] > ma224.iloc[-check_range:]) & \
                         (ma224.iloc[-check_range:] > ma448.iloc[-check_range:])
@@ -170,12 +169,11 @@ def main():
             if not alignment.any(): 
                 continue
 
-            # 지지선 접촉 조건 (±0.1% 오차범위)
+            # 2) 지지 조건 (오차범위 ±1.5% 적용)
             recent_low = low_s.iloc[-3:]
             recent_high = high_s.iloc[-3:]
             curr_price = float(close_s.iloc[-1])
 
-            # 통화 구분
             is_us_stock = not (ticker.endswith(".KS") or ticker.endswith(".KQ"))
             unit_str = "$" if is_us_stock else "원"
             price_fmt = f"{curr_price:,.2f}" if is_us_stock else f"{curr_price:,.0f}"
@@ -183,14 +181,14 @@ def main():
             lines = [("112일선 지지", ma112), ("224일선 지지", ma224), ("448일선 지지", ma448)]
             for line_name, ma_series in lines:
                 recent_ma = ma_series.iloc[-3:]
-                touch_condition = (recent_low <= recent_ma * 1.001) & (recent_high >= recent_ma * 0.999)
+                touch_condition = (recent_low <= recent_ma * 1.015) & (recent_high >= recent_ma * 0.985)
                 
                 if touch_condition.any():
                     val = float(ma_series.iloc[-1])
                     val_fmt = f"{val:,.2f}" if is_us_stock else f"{val:,.0f}"
                     
                     msg = f"⚡ *[{name}({ticker})]* {line_name}\n• 현재가: `{price_fmt}{unit_str}` | 이평선: `{val_fmt}{unit_str}`"
-                    matched.append(msg)
+                    matched_count += 1
 
                     # 차트 생성 및 전송
                     chart_df = df.tail(150).copy()
@@ -215,8 +213,8 @@ def main():
         except Exception as e:
             continue
 
-    if not matched:
-        send_telegram_msg("📈 *[주식 이평선 스캐너]*\n현재 정배열 및 112/224/448일선 지지(±0.1%) 조건에 부합하는 종목이 0건입니다.")
+    if matched_count == 0:
+        send_telegram_msg("✅ 스캔 완료: 현재 지지선 조건(±1.5%)에 포착된 종목이 없습니다.")
 
 if __name__ == "__main__":
     main()
