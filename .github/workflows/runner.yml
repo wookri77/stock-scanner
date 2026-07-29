@@ -1,9 +1,11 @@
-name: Combined Scanner
+name: Stock Scanner
 
 on:
-  workflow_dispatch: # 핸드폰 앱에서 '다시 실행' 수동 버튼 활성화
   schedule:
-    - cron: '0 9 * * 1-5' # 월~금 한국시간 18:00 자동 스캔 유지
+    # 한국시간(KST) 매주 월~금요일 오후 6시(18:00) 실행 
+    # (UTC 기준 오전 09:00 -> 0 9 * * 1-5)
+    - cron: '0 9 * * 1-5'
+  workflow_dispatch: # 필요할 때 언제든 버튼을 눌러 수동 실행 가능
 
 jobs:
   build:
@@ -21,12 +23,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas yfinance mplfinance matplotlib requests beautifulsoup4 lxml
           
-      - name: Run Crypto Scanner
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python crypto_main.py
-
       - name: Run Stock Scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
