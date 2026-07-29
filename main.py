@@ -10,17 +10,23 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 def send_telegram_msg(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"})
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
+    except Exception as e:
+        print(f"Telegram Msg Error: {e}")
 
 def send_telegram_photo(photo_path, caption=""):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    with open(photo_path, 'rb') as photo:
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, files={"photo": photo})
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        with open(photo_path, 'rb') as photo:
+            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, files={"photo": photo}, timeout=20)
+    except Exception as e:
+        print(f"Telegram Photo Error: {e}")
 
 # ==========================================
-# 스캔 대상 종목 리스트 (전체 일반 개별주 목록)
+# 스캔 대상 종목 리스트 (축소 절대 없음)
 # ==========================================
 STOCK_MARKETS = {
     # --- [국내주식: 코스피/코스닥 주요 개별주] ---
@@ -145,14 +151,16 @@ def main():
     for ticker, name in STOCK_MARKETS.items():
         try:
             df = yf.download(ticker, period="2y", progress=False)
-            if df is None or df.empty or len(df) < 448:
+            if df is None or df.empty or len(df) < 224:
                 continue
             
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
             df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
-            
+            if len(df) < 224:
+                continue
+
             close_s = df['Close'].astype(float)
             high_s = df['High'].astype(float)
             low_s = df['Low'].astype(float)
@@ -161,27 +169,23 @@ def main():
             ma224 = close_s.rolling(224).mean()
             ma448 = close_s.rolling(448).mean()
 
-            # 1) 정배열 조건 (112 > 224 > 448)
-            check_range = min(200, len(df))
-            alignment = (ma112.iloc[-check_range:] > ma224.iloc[-check_range:]) & \
-                        (ma224.iloc[-check_range:] > ma448.iloc[-check_range:])
-
-            if not alignment.any(): 
-                continue
-
-            # 2) 지지 조건 (오차범위 ±1.5% 적용)
-            recent_low = low_s.iloc[-3:]
-            recent_high = high_s.iloc[-3:]
+            # 1) 최근 지지 체크 (112선/224선/448선)
+            recent_low = low_s.iloc[-5:]
+            recent_high = high_s.iloc[-5:]
             curr_price = float(close_s.iloc[-1])
 
             is_us_stock = not (ticker.endswith(".KS") or ticker.endswith(".KQ"))
             unit_str = "$" if is_us_stock else "원"
             price_fmt = f"{curr_price:,.2f}" if is_us_stock else f"{curr_price:,.0f}"
 
-            lines = [("112일선 지지", ma112), ("224일선 지지", ma224), ("448일선 지지", ma448)]
+            lines = [("112일선 지지", ma112), ("224일선 지지", ma224)]
+            if len(df) >= 448:
+                lines.append(("448일선 지지", ma448))
+
             for line_name, ma_series in lines:
-                recent_ma = ma_series.iloc[-3:]
-                touch_condition = (recent_low <= recent_ma * 1.015) & (recent_high >= recent_ma * 0.985)
+                recent_ma = ma_series.iloc[-5:]
+                # 여유 있는 범위(±2.5%)로 지지 여부 탐지
+                touch_condition = (recent_low <= recent_ma * 1.025) & (recent_high >= recent_ma * 0.975)
                 
                 if touch_condition.any():
                     val = float(ma_series.iloc[-1])
@@ -194,14 +198,16 @@ def main():
                     chart_df = df.tail(150).copy()
                     chart_df['MA112'] = ma112.tail(150)
                     chart_df['MA224'] = ma224.tail(150)
-                    chart_df['MA448'] = ma448.tail(150)
+                    if len(df) >= 448:
+                        chart_df['MA448'] = ma448.tail(150)
 
                     add_plots = [
                         mpf.makeaddplot(chart_df['MA112'], color='blue', width=1.5),
-                        mpf.makeaddplot(chart_df['MA224'], color='orange', width=1.5),
-                        mpf.makeaddplot(chart_df['MA448'], color='red', width=1.5)
+                        mpf.makeaddplot(chart_df['MA224'], color='orange', width=1.5)
                     ]
-                    
+                    if len(df) >= 448:
+                        add_plots.append(mpf.makeaddplot(chart_df['MA448'], color='red', width=1.5))
+
                     filename = f"stock_{ticker.replace('.', '_')}.png"
                     mpf.plot(chart_df, type='candle', style='charles', addplot=add_plots, 
                              savefig=filename, volume=False, title=f"\n{name} ({ticker})")
@@ -211,10 +217,10 @@ def main():
                         os.remove(filename)
                     break
         except Exception as e:
+            print(f"Error processing {ticker}: {e}")
             continue
 
-    if matched_count == 0:
-        send_telegram_msg("✅ 스캔 완료: 현재 지지선 조건(±1.5%)에 포착된 종목이 없습니다.")
+    send_telegram_msg(f"🏁 *[주식 스캐너]* 스캔 완료! (발견된 종목: {matched_count}개)")
 
 if __name__ == "__main__":
     main()
