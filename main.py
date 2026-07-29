@@ -1,9 +1,8 @@
 import os
+import time
 import requests
 import pandas as pd
 import yfinance as yf
-import matplotlib.pyplot as plt
-import mplfinance as mpf
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -15,15 +14,6 @@ def send_telegram_msg(text):
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except Exception as e:
         print(f"Telegram Msg Error: {e}")
-
-def send_telegram_photo(photo_path, caption=""):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        with open(photo_path, 'rb') as photo:
-            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, files={"photo": photo}, timeout=20)
-    except Exception as e:
-        print(f"Telegram Photo Error: {e}")
 
 # ==========================================
 # 스캔 대상 종목 리스트 (축소 절대 없음)
@@ -169,7 +159,7 @@ def main():
             ma224 = close_s.rolling(224).mean()
             ma448 = close_s.rolling(448).mean()
 
-            # 1) 최근 지지 체크 (112선/224선/448선)
+            # 지지 체크 범위
             recent_low = low_s.iloc[-5:]
             recent_high = high_s.iloc[-5:]
             curr_price = float(close_s.iloc[-1])
@@ -184,37 +174,20 @@ def main():
 
             for line_name, ma_series in lines:
                 recent_ma = ma_series.iloc[-5:]
-                # 여유 있는 범위(±2.5%)로 지지 여부 탐지
                 touch_condition = (recent_low <= recent_ma * 1.025) & (recent_high >= recent_ma * 0.975)
                 
                 if touch_condition.any():
                     val = float(ma_series.iloc[-1])
                     val_fmt = f"{val:,.2f}" if is_us_stock else f"{val:,.0f}"
                     
-                    msg = f"⚡ *[{name}({ticker})]* {line_name}\n• 현재가: `{price_fmt}{unit_str}` | 이평선: `{val_fmt}{unit_str}`"
-                    matched_count += 1
-
-                    # 차트 생성 및 전송
-                    chart_df = df.tail(150).copy()
-                    chart_df['MA112'] = ma112.tail(150)
-                    chart_df['MA224'] = ma224.tail(150)
-                    if len(df) >= 448:
-                        chart_df['MA448'] = ma448.tail(150)
-
-                    add_plots = [
-                        mpf.makeaddplot(chart_df['MA112'], color='blue', width=1.5),
-                        mpf.makeaddplot(chart_df['MA224'], color='orange', width=1.5)
-                    ]
-                    if len(df) >= 448:
-                        add_plots.append(mpf.makeaddplot(chart_df['MA448'], color='red', width=1.5))
-
-                    filename = f"stock_{ticker.replace('.', '_')}.png"
-                    mpf.plot(chart_df, type='candle', style='charles', addplot=add_plots, 
-                             savefig=filename, volume=False, title=f"\n{name} ({ticker})")
+                    # 텍스트 메시지 포맷 (이전 형식 유지)
+                    msg = f"📌 *{name} ({ticker})*\n• 현재가: `{price_fmt}{unit_str}`\n• 상태: {line_name} (이평선: `{val_fmt}{unit_str}`)\n--------------------------------"
                     
-                    send_telegram_photo(filename, caption=msg)
-                    if os.path.exists(filename): 
-                        os.remove(filename)
+                    send_telegram_msg(msg)
+                    matched_count += 1
+                    
+                    # 도배 방지용 미세 딜레이 (0.2초)
+                    time.sleep(0.2)
                     break
         except Exception as e:
             print(f"Error processing {ticker}: {e}")
